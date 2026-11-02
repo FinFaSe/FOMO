@@ -1,0 +1,15 @@
+# Apply in addition to compose.yaml on this managed Linux cloud environment.
+# The Docker client's existing proxy defaults must be kept intact.
+services:
+  backend:
+    build:
+      secrets: [system_ca]
+    secrets: [system_ca]
+    environment:
+      SSL_CERT_FILE: /run/secrets/system_ca
+  frontend:
+    build:
+      secrets: [system_ca]
+secrets:
+  system_ca:
+    file: /etc/ssl/certs/ca-certificates.crt

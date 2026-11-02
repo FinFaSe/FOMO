@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.env
+!.env.example
+.data/
+*.db
+*.db-shm
+*.db-wal
+node_modules/
+.next/
+playwright-report/
+test-results/
+*.tsbuildinfo
+*.log
