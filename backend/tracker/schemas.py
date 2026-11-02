@@ -104,6 +104,8 @@ class SyncRequest(StrictModel):
     days: int = Field(default=90, ge=1, le=3650)
     max_pages: int = Field(default=2, ge=1, le=20)
     page_size: int = Field(default=10, ge=1, le=100)
+    # Re-download stored transactions from the newest one and compare digests; ignores cursors.
+    revalidate: bool = False
 
 
 class DiscoveryRequest(StrictModel):

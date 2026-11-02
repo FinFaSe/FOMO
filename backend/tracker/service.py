@@ -7,13 +7,20 @@ from sqlalchemy.exc import IntegrityError
 
 from .adapters.solana import ProviderError, digest, observe
 from .analytics import Fill, analyze
-from .db import AnalysisSnapshot, EventRecord, Observation, RawTransaction, Wallet, now_iso
+from .db import AnalysisSnapshot, EventRecord, Observation, RawTransaction, SyncState, Wallet, now_iso
 from .schemas import Filters, LedgerImport, SyncRequest
 
 
-def store_transaction(session, rpc, signature: str) -> RawTransaction:
-    payload = rpc.transaction(signature)
+def store_transaction(session, rpc, signature: str, *, refresh: bool = False) -> RawTransaction:
+    """Return stored evidence; only call the RPC when it is missing or `refresh` is requested.
+
+    A refresh re-downloads the finalized transaction and compares digests, so a provider that
+    changes a finalized response produces a conflict instead of a silent overwrite.
+    """
     row = session.get(RawTransaction, signature)
+    if row and not refresh:
+        return row
+    payload = rpc.transaction(signature)
     if row:
         # Finalized ledger should not change; preserve original evidence instead of silently replacing it.
         if row.digest != digest(payload):
@@ -26,53 +33,188 @@ def store_transaction(session, rpc, signature: str) -> RawTransaction:
     return row
 
 
+def _record(session, wallet: Wallet, rpc, signature: str, report: dict, *, refresh: bool = False):
+    """Store one listed signature for the wallet. Known observations cost no RPC call."""
+
+    known = session.scalar(select(Observation.id).where(Observation.wallet == wallet.address,
+                                                        Observation.signature == signature))
+    if known and not refresh:
+        report["already_known"] += 1
+        return
+    stored = session.get(RawTransaction, signature) is not None
+    raw = store_transaction(session, rpc, signature, refresh=refresh)
+    report["rpc_transaction_fetches"] += int(refresh or not stored)
+    report["reused_stored_payloads"] += int(stored and not refresh)
+    report["cursor"] = signature
+    if known:
+        report["revalidated"] += 1
+        return
+    observation = observe(raw.payload, wallet.address)
+    session.add(Observation(wallet=wallet.address, signature=raw.signature,
+                            details={**observation, "source": raw.source,
+                                     "payload_sha256": raw.digest, "fetched_at": raw.fetched_at}))
+    report["transactions"] += 1
+    report["failed_transactions"] += int(observation["status"] == "failed")
+
+
+def _missing_block_time(state: SyncState | None, report: dict):
+    if state is not None:
+        state.missing_block_times += 1
+    if "missing_block_time" not in report["issues"]:
+        report["issues"].append("missing_block_time")
+
+
+def _page(rpc, wallet: Wallet, report: dict, budget: list[int], **kwargs):
+    """List one page. An empty listing (nothing new) is reported but does not spend the budget."""
+    page = rpc.signatures(wallet.address, **kwargs)
+    report["pages"] += 1
+    if page:
+        budget[0] -= 1
+    return page
+
+
+def _catch_up(session, wallet: Wallet, rpc, state: SyncState, request: SyncRequest, report: dict,
+              budget: list[int]) -> bool:
+    """List signatures newer than head (resuming an interrupted catch-up). True when it reached head."""
+
+    while budget[0] > 0:
+        page = _page(rpc, wallet, report, budget, before=state.catchup_before,
+                     until=state.head_signature, limit=request.page_size)
+        for item in page:
+            _record(session, wallet, rpc, item["signature"], report)
+            if state.catchup_head is None:
+                state.catchup_head = item["signature"]
+            state.catchup_before = item["signature"]
+            if item.get("blockTime") is None:
+                _missing_block_time(state, report)
+            state.updated_at = now_iso()
+            session.commit()
+        if len(page) < request.page_size:
+            if state.catchup_head:
+                state.head_signature = state.catchup_head
+            state.catchup_head = state.catchup_before = None
+            state.updated_at = now_iso()
+            session.commit()
+            return True
+    return False
+
+
+def _backfill(session, wallet: Wallet, rpc, state: SyncState, request: SyncRequest, report: dict,
+              budget: list[int], since: int) -> bool:
+    """Extend coverage below tail until the window start or the wallet's first signature."""
+
+    if state.history_start_reached or (state.covered_from is not None and state.covered_from <= since):
+        return True
+    while budget[0] > 0:
+        page = _page(rpc, wallet, report, budget, before=state.tail_signature, limit=request.page_size)
+        for item in page:
+            block_time = item.get("blockTime")
+            if block_time is not None and block_time < since:
+                # Listing is newest first: every signature newer than this one is already stored.
+                # Tail stays on the last processed signature so a wider window resumes right here.
+                state.covered_from = block_time + 1
+                state.updated_at = now_iso()
+                session.commit()
+                return True
+            _record(session, wallet, rpc, item["signature"], report)
+            if state.head_signature is None:
+                state.head_signature = item["signature"]
+            state.tail_signature = item["signature"]
+            if block_time is None:
+                _missing_block_time(state, report)
+            else:
+                state.tail_block_time = block_time
+                state.covered_from = block_time + 1
+            state.updated_at = now_iso()
+            session.commit()
+        if len(page) < request.page_size:
+            state.history_start_reached = True
+            state.covered_from = 0
+            state.updated_at = now_iso()
+            session.commit()
+            return True
+    return False
+
+
+def _revalidate(session, wallet: Wallet, rpc, request: SyncRequest, report: dict, budget: list[int],
+                since: int) -> bool:
+    """Re-download from the newest signature and compare digests. Does not move incremental cursors."""
+
+    before = None
+    while budget[0] > 0:
+        page = _page(rpc, wallet, report, budget, before=before, limit=request.page_size)
+        for item in page:
+            block_time = item.get("blockTime")
+            if block_time is not None and block_time < since:
+                return True
+            _record(session, wallet, rpc, item["signature"], report, refresh=True)
+            if block_time is None:
+                _missing_block_time(None, report)
+            session.commit()
+        if len(page) < request.page_size:
+            return True
+        before = page[-1]["signature"]
+    return False
+
+
+def _coverage(state: SyncState | None) -> dict | None:
+    if state is None:
+        return None
+    return {"head_signature": state.head_signature, "tail_signature": state.tail_signature,
+            "tail_block_time": state.tail_block_time,
+            "covered_from": (datetime.fromtimestamp(state.covered_from, timezone.utc).isoformat()
+                             if state.covered_from is not None else None),
+            "history_start_reached": state.history_start_reached,
+            "catchup_pending": state.catchup_before is not None,
+            "missing_block_times": state.missing_block_times, "updated_at": state.updated_at}
+
+
 def ingest(session, wallet: Wallet, rpc, request: SyncRequest) -> dict:
-    since = datetime.now(timezone.utc) - timedelta(days=request.days)
-    report = {"started_at": now_iso(), "since": since.isoformat(), "state": "running",
-              "transactions": 0, "failed_transactions": 0, "pages": 0, "cursor": None,
+    """Incremental scan: catch up on signatures newer than head, then backfill below tail.
+
+    Signatures already observed for this wallet cost no getTransaction call. `max_pages` is a
+    per-run budget of signature pages; the next run resumes from the stored cursors.
+    """
+
+    since_dt = datetime.now(timezone.utc) - timedelta(days=request.days)
+    since = int(since_dt.timestamp())
+    report = {"started_at": now_iso(), "since": since_dt.isoformat(), "state": "running",
+              "mode": "revalidate" if request.revalidate else "incremental",
+              "transactions": 0, "already_known": 0, "revalidated": 0, "rpc_transaction_fetches": 0,
+              "reused_stored_payloads": 0, "failed_transactions": 0, "pages": 0, "cursor": None,
               "signature_window_complete": False, "normalized_history_complete": False,
               "issues": [], "source": rpc.source}
     wallet.sync = report.copy()
     session.commit()
-    before = None
+    budget = [request.max_pages]
+    state = None
     try:
-        for _ in range(request.max_pages):
-            page = rpc.signatures(wallet.address, before=before, limit=request.page_size)
-            report["pages"] += 1
-            if not page:
-                report["signature_window_complete"] = True
-                break
-            crossed = False
-            for item in page:
-                block_time = item.get("blockTime")
-                if block_time is None:
-                    report["issues"].append("missing_block_time")
-                elif block_time < since.timestamp():
-                    crossed = True
-                    break
-                raw = store_transaction(session, rpc, item["signature"])
-                observation = observe(raw.payload, wallet.address)
-                old = session.scalar(select(Observation).where(Observation.wallet == wallet.address,
-                                                               Observation.signature == raw.signature))
-                if not old:
-                    session.add(Observation(wallet=wallet.address, signature=raw.signature,
-                                            details={**observation, "source": raw.source,
-                                                     "payload_sha256": raw.digest, "fetched_at": raw.fetched_at}))
-                report["transactions"] += 1
-                report["failed_transactions"] += int(observation["status"] == "failed")
+        if request.revalidate:
+            complete = _revalidate(session, wallet, rpc, request, report, budget, since)
+            complete = complete and "missing_block_time" not in report["issues"]
+            state = session.get(SyncState, wallet.address)
+        else:
+            state = session.get(SyncState, wallet.address)
+            if state is None:
+                state = SyncState(wallet=wallet.address)
+                session.add(state)
                 session.commit()
-            before = page[-1]["signature"]
-            report["cursor"] = before
-            if crossed or len(page) < request.page_size:
-                report["signature_window_complete"] = "missing_block_time" not in report["issues"]
-                break
-        report["state"] = "scanned" if report["signature_window_complete"] else "partial"
-        if not report["signature_window_complete"]:
+            initialized = state.head_signature is not None or state.history_start_reached
+            caught_up = _catch_up(session, wallet, rpc, state, request, report, budget) if initialized else True
+            backfilled = caught_up and _backfill(session, wallet, rpc, state, request, report, budget, since)
+            complete = caught_up and backfilled and state.missing_block_times == 0
+            if caught_up and backfilled and state.missing_block_times and "missing_block_time" not in report["issues"]:
+                report["issues"].append("missing_block_time")
+        report["signature_window_complete"] = complete
+        report["state"] = "scanned" if complete else "partial"
+        if not complete and budget[0] <= 0:
             report["issues"].append("page_budget_reached")
     except ProviderError as exc:
+        # Work committed before the failure is kept; cursors point at the last stored signature.
         session.rollback()
         report["state"] = "partial"
         report["issues"].append(exc.message)
+    report["coverage"] = _coverage(state)
     report["finished_at"] = now_iso()
     # Wallet may have expired on rollback, but its identity is retained in this session.
     wallet.sync = report
@@ -111,7 +253,7 @@ def verify_ledger(session, wallet: str, rpc, *, limit: int = 50, offset: int = 0
     for signature in signatures:
         matching = [e for e in records if e.signature == signature]
         try:
-            raw = store_transaction(session, rpc, signature)
+            raw = store_transaction(session, rpc, signature, refresh=True)
             ob = observe(raw.payload, wallet)
             for row in matching:
                 same_mint = [e for e in matching if e.token == row.token]

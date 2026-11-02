@@ -25,6 +25,28 @@ class Wallet(Base):
     sync: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
+class SyncState(Base):
+    """Incremental scan cursors. Every signature between head and tail has been processed.
+
+    Signatures are listed newest first, so coverage grows in two directions: catch-up (newer than
+    head, bounded by `until`) and backfill (older than tail, bounded by `before`). An interrupted
+    catch-up keeps its own cursor so the gap between it and head is never silently skipped.
+    """
+
+    __tablename__ = "sync_state"
+    wallet: Mapped[str] = mapped_column(ForeignKey("wallets.address"), primary_key=True)
+    head_signature: Mapped[str | None] = mapped_column(String(88), nullable=True)
+    tail_signature: Mapped[str | None] = mapped_column(String(88), nullable=True)
+    tail_block_time: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Every signature with block_time >= covered_from has been processed (between head and tail).
+    covered_from: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    history_start_reached: Mapped[bool] = mapped_column(Boolean, default=False)
+    catchup_before: Mapped[str | None] = mapped_column(String(88), nullable=True)
+    catchup_head: Mapped[str | None] = mapped_column(String(88), nullable=True)
+    missing_block_times: Mapped[int] = mapped_column(Integer, default=0)
+    updated_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+
+
 class RawTransaction(Base):
     __tablename__ = "raw_transactions"
     signature: Mapped[str] = mapped_column(String(88), primary_key=True)

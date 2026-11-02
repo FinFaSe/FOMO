@@ -51,6 +51,13 @@ La correlación entre tokens aún puede reducir la independencia. Ver [método](
 2. Inspecciona las firmas finalizadas, errores, deltas y enlaces al explorador de bloques.
    El dashboard limita cada petición a 20 transacciones para respetar el RPC gratuito.
    La API acepta `max_pages` y `page_size`; alcanzar el límite se muestra como cobertura parcial.
+   La ingesta es **incremental**: cada wallet guarda cursores (`head`, `tail`) y la siguiente
+   sincronización continúa donde terminó la anterior. Primero recupera firmas más nuevas que `head`
+   (si se interrumpe, retoma ese hueco antes de avanzar) y después amplía hacia atrás desde `tail`
+   hasta el inicio de la ventana o del historial. Las transacciones ya almacenadas no se vuelven a
+   descargar con `getTransaction`, tampoco las guardadas por **Verificar ledger**. Un listado vacío
+   no consume el presupuesto de páginas. `{"revalidate": true}` vuelve a descargar desde la firma
+   más reciente y compara el SHA-256 con la evidencia original, sin mover los cursores.
 3. Importa un ledger JSON documentado mediante el perfil para reconstruir posiciones.
    La importación es una declaración externa, **no** evidencia verificada por sí misma.
 4. **Verificar ledger** comprueba fecha y delta neto del token contra el RPC. No valida

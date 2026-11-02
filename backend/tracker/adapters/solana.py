@@ -68,10 +68,12 @@ class SolanaRPC:
             except (ValueError, KeyError, TypeError):
                 raise ProviderError("Respuesta RPC inválida") from None
 
-    def signatures(self, wallet: str, *, before: str | None = None, limit: int = 10):
+    def signatures(self, wallet: str, *, before: str | None = None, until: str | None = None, limit: int = 10):
         opts = {"commitment": "finalized", "limit": limit}
         if before:
             opts["before"] = before
+        if until:
+            opts["until"] = until
         return self.call("getSignaturesForAddress", [wallet, opts])
 
     def transaction(self, signature: str):

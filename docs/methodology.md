@@ -60,6 +60,11 @@ de esas condiciones, fraude o replicabilidad sin evidencia. El score exploratori
 
 Cada RPC conserva respuesta original, origen sin claves, slot, timestamp original, fecha de captura y SHA-256.
 Duplicados no cambian evidencia; una respuesta finalized distinta genera conflicto, no sobrescritura.
+La sincronización incremental reutiliza la evidencia almacenada sin volver a pedirla; la comparación con
+una nueva descarga ocurre al **Verificar ledger** y en el modo `revalidate`. La cobertura de firmas se
+registra por wallet (`sync_state`): todo lo listado entre `head` y `tail` está almacenado, y
+`covered_from` indica desde qué `blockTime` la ventana está completa. Esto describe firmas, no swaps
+normalizados: `normalized_history_complete` sigue siendo falso.
 Un registro ausente o proveedor incompleto no se trata automáticamente como reorganización probada.
 Las transacciones fallidas se almacenan como tales sin convertirlas en trades. Una verificación por delta coincidente
 no verifica el intercambio económico ni el precio USD. Importaciones no aceptan campos de verificación del servidor.

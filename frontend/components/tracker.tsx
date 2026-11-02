@@ -132,10 +132,10 @@ export default function Tracker() {
   }
   async function sync() {
     await action("sync", async () => {
-      const r = await api<{state: string; transactions: number; issues: string[]}>(`/wallets/${selected}/sync`,
+      const r = await api<{state: string; transactions: number; rpc_transaction_fetches: number; issues: string[]}>(`/wallets/${selected}/sync`,
         post({ days: filters.analysis_days, max_pages: 2, page_size: 10 }));
       await reloadWallets();
-      setNotice(`${r.transactions} transacciones procesadas. ${r.state === "partial" ? "Historial parcial: " + r.issues.join(", ") : "Ventana de firmas escaneada; falta normalización financiera completa."}`);
+      setNotice(`${r.transactions} transacciones nuevas (${r.rpc_transaction_fetches} descargadas del RPC). ${r.state === "partial" ? "Historial parcial: " + r.issues.join(", ") + ". Vuelve a sincronizar para continuar desde el cursor." : "Ventana de firmas escaneada; falta normalización financiera completa."}`);
     });
   }
   async function importFile(file: File) {

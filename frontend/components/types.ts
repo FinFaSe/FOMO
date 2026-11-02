@@ -9,7 +9,8 @@ export type Filters = {
 export type Wallet = {
   address: string; label: string; favorite: boolean;
   identity: { handle: string; verification: string; source: string } | null;
-  sync: { state: string; transactions: number; signature_window_complete: boolean; issues: string[] } | null;
+  sync: { state: string; transactions: number; already_known?: number; rpc_transaction_fetches?: number;
+    signature_window_complete: boolean; issues: string[] } | null;
 };
 export type Fill = {
   signature: string; kind: string; timestamp: string; quantity: string;

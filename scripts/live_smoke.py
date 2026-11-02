@@ -29,7 +29,8 @@ def main():
         with Session(app.state.engine) as session:
             original = store_transaction(session, rpc, signature)
             session.commit()
-            repeated = store_transaction(session, rpc, signature)
+            # refresh=True forces a second real download to prove the digest is stable.
+            repeated = store_transaction(session, rpc, signature, refresh=True)
             assert repeated.digest == original.digest
             session.commit()
         with TestClient(app) as client:
@@ -38,6 +39,9 @@ def main():
             first = client.post(f"/api/wallets/{wallet}/sync", json=request).json()
             if first["transactions"] == 0:
                 raise RuntimeError(f"No transactions ingested: {first['issues']}")
+            again = client.post(f"/api/wallets/{wallet}/sync", json=request).json()
+            # Incremental resync must not download the transaction already stored.
+            assert again["transactions"] == 0, again
             observations = client.get(f"/api/wallets/{wallet}/observations").json()
             analysis = client.get(f"/api/wallets/{wallet}/analysis").json()
             assert observations["total"] >= 1
@@ -46,7 +50,7 @@ def main():
             assert analysis["metrics"]["net_realized_pnl_usd"] is None
             output = {"real_data": True, "audited_signature": signature, "audited_slot": tx["slot"],
                       "audited_payload_sha256": digest(tx), "wallet": wallet,
-                      "ingestion": first, "observations": observations["total"],
+                      "ingestion": first, "incremental_resync": again, "observations": observations["total"],
                       "snapshot_id": analysis["snapshot_id"], "verified_performance": False}
             output["deduplication_verified"] = True
             print(json.dumps(output, indent=2))

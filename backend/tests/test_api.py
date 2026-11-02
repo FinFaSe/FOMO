@@ -32,17 +32,45 @@ def transaction():
 
 
 class SyntheticRPC:
+    """Newest-first signature history with documented `before`/`until` paging semantics."""
+
     source = "https://synthetic.example.org"
 
     def __init__(self):
         self.payload = transaction()
+        self.payloads = {}
+        self.history = [{"signature": SIG, "blockTime": int(AS_OF.timestamp()), "err": None}]
+        self.fetches = []
 
-    def signatures(self, wallet, before=None, limit=10):
-        return [{"signature": SIG, "blockTime": int(AS_OF.timestamp()), "err": None}] if not before else []
+    def signatures(self, wallet, before=None, until=None, limit=10):
+        items = list(self.history)
+        if before:
+            names = [i["signature"] for i in items]
+            items = items[names.index(before) + 1:] if before in names else []
+        if until:
+            names = [i["signature"] for i in items]
+            items = items[:names.index(until)] if until in names else items
+        return copy.deepcopy(items[:limit])
 
     def transaction(self, signature):
-        assert signature == SIG
-        return copy.deepcopy(self.payload)
+        self.fetches.append(signature)
+        if signature == SIG:
+            return copy.deepcopy(self.payload)
+        return copy.deepcopy(self.payloads[signature])
+
+    def add(self, n, block_time, *, newest=True):
+        """Register a SYNTHETIC transaction; newest=True prepends it as a fresh arrival."""
+        sig = b58(1000 + n, 64)
+        payload = transaction()
+        payload["transaction"]["signatures"] = [sig]
+        payload["blockTime"], payload["slot"] = block_time, 2000 + n
+        self.payloads[sig] = payload
+        item = {"signature": sig, "blockTime": block_time, "err": None}
+        if newest:
+            self.history.insert(0, item)
+        else:
+            self.history.append(item)
+        return sig
 
 
 @pytest.fixture
@@ -96,7 +124,10 @@ def test_finalized_conflict_never_overwrites_original(client):
     c, rpc = client
     c.post(f"/api/wallets/{WALLET}/sync", json={})
     rpc.payload["slot"] = 9999
-    r = c.post(f"/api/wallets/{WALLET}/sync", json={}).json()
+    # Incremental sync trusts stored evidence; revalidation re-downloads and compares digests.
+    assert c.post(f"/api/wallets/{WALLET}/sync", json={}).json()["state"] == "scanned"
+    r = c.post(f"/api/wallets/{WALLET}/sync", json={"revalidate": True}).json()
+    assert r["mode"] == "revalidate"
     assert r["state"] == "partial"
     assert "Conflicto" in r["issues"][0]
     with Session(c.app.state.engine) as s:
