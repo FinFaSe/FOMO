@@ -14,7 +14,8 @@ Implementado: primera ruta funcional de investigación, no la totalidad de la es
    coincidencia entre tokens y wallets; controlar sesgos y separar candidatos de resultados validados.
 4. **Rankings especializados y comparación**: Early Hunters, Consistent Winners, ≥1.000% (11×), High Accuracy,
    Rising y Replicable. Añadir señales de entidades/deployers, límites de confianza y pesos configurables.
-5. **Monitoreo y alertas**: worker persistente, colas/Redis cuando se justifique, eventos finalizados,
+5. **Monitoreo y alertas** (parcial: worker persistente con cola en la base de datos y refresco periódico de la
+   watchlist): worker persistente, colas/Redis cuando se justifique, eventos finalizados,
    deduplicación de notificaciones, timestamps de detección/envío y latencia medida. No WebSocket perpetuo en Actions.
 6. **Convergencia y riesgo**: agrupar wallets vinculadas para evitar señales independientes falsas;
    fuentes verificables para concentración, manipulaciones aparentes y restricciones de venta.

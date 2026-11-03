@@ -29,6 +29,18 @@ services:
       interval: 5s
       timeout: 3s
       retries: 20
+  worker:
+    build: ./backend
+    command: [python, -m, tracker.worker]
+    environment:
+      DATABASE_URL: postgresql+psycopg://tracker:${POSTGRES_PASSWORD:?Set a local POSTGRES_PASSWORD}@postgres:5432/tracker
+      SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
+      TRACKER_REFRESH_MINUTES: ${TRACKER_REFRESH_MINUTES:-30}
+    depends_on:
+      # The API creates the schema on start; run exactly one worker per database.
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
   frontend:
     build: ./frontend
     environment:

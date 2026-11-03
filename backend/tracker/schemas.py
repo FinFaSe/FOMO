@@ -108,6 +108,18 @@ class SyncRequest(StrictModel):
     revalidate: bool = False
 
 
+class JobRequest(SyncRequest):
+    """Background sync: larger page budget per round, follow-up rounds until the window is complete."""
+
+    max_pages: int = Field(default=5, ge=1, le=20)
+    page_size: int = Field(default=50, ge=1, le=100)
+    until_complete: bool = True
+    max_rounds: int = Field(default=30, ge=1, le=200)
+
+    def sync_request(self) -> SyncRequest:
+        return SyncRequest(**self.model_dump(include=set(SyncRequest.model_fields)))
+
+
 class DiscoveryRequest(StrictModel):
     token: str = Field(max_length=44)
     limit: int = Field(default=3, ge=1, le=10)

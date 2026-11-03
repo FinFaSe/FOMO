@@ -114,8 +114,12 @@ def _page(rpc, wallet: Wallet, report: dict, budget: list[int], **kwargs):
     return page
 
 
+def _noop(report: dict):
+    return None
+
+
 def _catch_up(session, wallet: Wallet, rpc, state: SyncState, request: SyncRequest, report: dict,
-              budget: list[int]) -> bool:
+              budget: list[int], tick=_noop) -> bool:
     """List signatures newer than head (resuming an interrupted catch-up). True when it reached head."""
 
     while budget[0] > 0:
@@ -130,6 +134,7 @@ def _catch_up(session, wallet: Wallet, rpc, state: SyncState, request: SyncReque
                 _missing_block_time(state, report)
             state.updated_at = now_iso()
             session.commit()
+            tick(report)
         if len(page) < request.page_size:
             if state.catchup_head:
                 state.head_signature = state.catchup_head
@@ -141,7 +146,7 @@ def _catch_up(session, wallet: Wallet, rpc, state: SyncState, request: SyncReque
 
 
 def _backfill(session, wallet: Wallet, rpc, state: SyncState, request: SyncRequest, report: dict,
-              budget: list[int], since: int) -> bool:
+              budget: list[int], since: int, tick=_noop) -> bool:
     """Extend coverage below tail until the window start or the wallet's first signature."""
 
     if state.history_start_reached or (state.covered_from is not None and state.covered_from <= since):
@@ -168,6 +173,7 @@ def _backfill(session, wallet: Wallet, rpc, state: SyncState, request: SyncReque
                 state.covered_from = block_time + 1
             state.updated_at = now_iso()
             session.commit()
+            tick(report)
         if len(page) < request.page_size:
             state.history_start_reached = True
             state.covered_from = 0
@@ -178,7 +184,7 @@ def _backfill(session, wallet: Wallet, rpc, state: SyncState, request: SyncReque
 
 
 def _revalidate(session, wallet: Wallet, rpc, request: SyncRequest, report: dict, budget: list[int],
-                since: int) -> bool:
+                since: int, tick=_noop) -> bool:
     """Re-download from the newest signature and compare digests. Does not move incremental cursors."""
 
     before = None
@@ -192,6 +198,7 @@ def _revalidate(session, wallet: Wallet, rpc, request: SyncRequest, report: dict
             if block_time is None:
                 _missing_block_time(None, report)
             session.commit()
+            tick(report)
         if len(page) < request.page_size:
             return True
         before = page[-1]["signature"]
@@ -213,12 +220,15 @@ def _coverage(state: SyncState | None) -> dict | None:
 FINALIZATION_MARGIN = timedelta(seconds=120)
 
 
-def ingest(session, wallet: Wallet, rpc, request: SyncRequest) -> dict:
+def ingest(session, wallet: Wallet, rpc, request: SyncRequest, on_progress=None) -> dict:
     """Incremental scan: catch up on signatures newer than head, then backfill below tail.
 
     Signatures already observed for this wallet cost no getTransaction call. `max_pages` is a
     per-run budget of signature pages; the next run resumes from the stored cursors.
+    `on_progress(report)` runs after every stored transaction; raising ProviderError there stops the
+    scan cleanly (used for cancellation).
     """
+    tick = on_progress or _noop
 
     since_dt = datetime.now(timezone.utc) - timedelta(days=request.days)
     since = int(since_dt.timestamp())
@@ -236,7 +246,7 @@ def ingest(session, wallet: Wallet, rpc, request: SyncRequest) -> dict:
     listed_through = (datetime.now(timezone.utc) - FINALIZATION_MARGIN).replace(microsecond=0).isoformat()
     try:
         if request.revalidate:
-            complete = _revalidate(session, wallet, rpc, request, report, budget, since)
+            complete = _revalidate(session, wallet, rpc, request, report, budget, since, tick)
             complete = complete and "missing_block_time" not in report["issues"]
             state = session.get(SyncState, wallet.address)
         else:
@@ -251,8 +261,9 @@ def ingest(session, wallet: Wallet, rpc, request: SyncRequest) -> dict:
                 if rebuilt["transactions"]:
                     report["renormalized"] = rebuilt
             initialized = state.head_signature is not None or state.history_start_reached
-            caught_up = _catch_up(session, wallet, rpc, state, request, report, budget) if initialized else True
-            backfilled = caught_up and _backfill(session, wallet, rpc, state, request, report, budget, since)
+            caught_up = (_catch_up(session, wallet, rpc, state, request, report, budget, tick)
+                         if initialized else True)
+            backfilled = caught_up and _backfill(session, wallet, rpc, state, request, report, budget, since, tick)
             complete = caught_up and backfilled and state.missing_block_times == 0
             if caught_up and backfilled and state.missing_block_times and "missing_block_time" not in report["issues"]:
                 report["issues"].append("missing_block_time")
@@ -271,6 +282,7 @@ def ingest(session, wallet: Wallet, rpc, request: SyncRequest) -> dict:
         session.rollback()
         report["state"] = "partial"
         report["issues"].append(exc.message)
+        report["error"] = exc.message
     report["coverage"] = _coverage(state)
     report["finished_at"] = now_iso()
     # Wallet may have expired on rollback, but its identity is retained in this session.

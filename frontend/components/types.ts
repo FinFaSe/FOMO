@@ -68,3 +68,14 @@ export type ChainPositions = {
     losses: number; win_rate: number | null; net_realized_pnl_sol: string | null;
     aggregate_realized_roi_pct: string | null; median_roi_pct: string | null };
 };
+export type Job = {
+  id: number; wallet: string; state: string; origin: string; round: number; parent_id: number | null;
+  attempts: number; run_after: string; created_at: string; started_at: string | null; finished_at: string | null;
+  error: string | null; params: { days: number; max_rounds: number };
+  progress: { transactions?: number; pages?: number; trades?: number; issues?: string[] } | null;
+  result: { state?: string; pricing?: { priced?: number; unpriced?: number; error?: string } } | null;
+};
+export type WorkerStatus = {
+  alive: boolean; queued: number; running: number;
+  workers: { id: string; heartbeat_at: string; alive: boolean; info: { refresh_minutes?: number } | null }[];
+};

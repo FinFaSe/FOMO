@@ -16,6 +16,15 @@ uv sync --frozen --group dev
 uv run uvicorn tracker.main:app --host 127.0.0.1 --port 8000
 ```
 
+En otra terminal, el worker que ejecuta las sincronizaciones en segundo plano (uno solo por base de datos):
+
+```bash
+cd backend
+uv run python -m tracker.worker
+```
+
+Para uso local en un solo proceso, `TRACKER_EMBEDDED_WORKER=1` arranca el worker como hilo dentro de la API.
+
 En otra terminal:
 
 ```bash
@@ -48,9 +57,17 @@ La correlación entre tokens aún puede reducir la independencia. Ver [método](
 ## Uso
 
 1. Añade una wallet pública en el explorador y pulsa **Sincronizar on-chain**.
-2. Inspecciona las firmas finalizadas, errores, deltas y enlaces al explorador de bloques.
-   El dashboard limita cada petición a 20 transacciones para respetar el RPC gratuito.
-   La API acepta `max_pages` y `page_size`; alcanzar el límite se muestra como cobertura parcial.
+2. **Sincronizar on-chain** encola un trabajo en segundo plano (`POST /api/wallets/{wallet}/jobs`). El worker
+   lo ejecuta por rondas (por defecto 5 páginas × 50 firmas) y encola la siguiente ronda mientras falten
+   firmas o precios (`until_complete`, máx. `max_rounds` = 30), de modo que un historial largo se completa
+   solo y se intercala con otras wallets. El dashboard muestra la ronda y el progreso, permite cancelar
+   (se detiene tras la transacción en curso, sin perder lo guardado) y avisa si no hay worker activo.
+   Los errores del proveedor se reintentan con espera exponencial (30 s, 60 s, …; 5 intentos); un trabajo
+   cuyo worker deja de latir 10 min vuelve a la cola. Las wallets de la **watchlist** se resincronizan cada
+   `TRACKER_REFRESH_MINUTES` (30 por defecto; 0 lo desactiva). `GET /api/jobs`, `GET /api/jobs/{id}`,
+   `POST /api/jobs/{id}/cancel` y `GET /api/worker` exponen la cola. `POST /api/wallets/{wallet}/sync` sigue
+   disponible como ejecución síncrona y acotada (scripts, pruebas) y se registra como trabajo. Mientras una
+   wallet se sincroniza, normalizar, valorar o verificar esa wallet responde 409.
    La ingesta es **incremental**: cada wallet guarda cursores (`head`, `tail`) y la siguiente
    sincronización continúa donde terminó la anterior. Primero recupera firmas más nuevas que `head`
    (si se interrumpe, retoma ese hueco antes de avanzar) y después amplía hacia atrás desde `tail`
@@ -135,10 +152,13 @@ Variables opcionales:
 | `BACKEND_URL` | En Next, por defecto `http://127.0.0.1:8000` |
 | `TRACKER_ACCESS_TOKEN` | Opcional: protege la API; Next lo adjunta del lado servidor |
 | `CORS_ORIGINS` | Orígenes locales permitidos, separados por comas |
+| `TRACKER_REFRESH_MINUTES` | Worker: intervalo de resincronización de la watchlist (30; 0 desactiva) |
+| `TRACKER_EMBEDDED_WORKER` | `1` ejecuta el worker como hilo de la API (solo uso local) |
 
 La aplicación está diseñada para desarrollo local de un solo investigador. El proxy web no implementa
 autenticación de usuarios: no exponerlo públicamente sin añadir login, autorización, TLS y límites por usuario.
-Ejecutar FastAPI con un solo worker: el bloqueo de escrituras y el limitador RPC son locales al proceso.
+Ejecutar FastAPI con un solo proceso y un único worker de fondo: el bloqueo de escrituras y el limitador
+RPC son locales a cada proceso. Con SQLite, API y worker comparten el archivo en modo WAL con espera de bloqueo.
 
 ## Pruebas y compilación
 
@@ -167,7 +187,7 @@ ni 30 posiciones ganadoras. [Evidencia de validación](docs/validation.md).
 
 ## Docker Compose
 
-`compose.yaml` define PostgreSQL, API y frontend. Elige una contraseña local y mantenla fuera de Git:
+`compose.yaml` define PostgreSQL, API, worker y frontend. Elige una contraseña local y mantenla fuera de Git:
 
 ```bash
 export POSTGRES_PASSWORD="$(openssl rand -hex 24)"

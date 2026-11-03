@@ -7,6 +7,12 @@ services:
     secrets: [system_ca]
     environment:
       SSL_CERT_FILE: /run/secrets/system_ca
+  worker:
+    build:
+      secrets: [system_ca]
+    secrets: [system_ca]
+    environment:
+      SSL_CERT_FILE: /run/secrets/system_ca
   frontend:
     build:
       secrets: [system_ca]

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import type { Analysis, ChainPositions, ChainTrade, Config, Filters, Observation, Wallet } from "./types";
+import type { Analysis, ChainPositions, ChainTrade, Config, Filters, Job, Observation, Wallet, WorkerStatus } from "./types";
 
 const initial: Filters = { max_entry_market_cap_usd: "250000", min_realized_roi_pct: "500",
   min_win_rate: 0.6, min_evaluable_positions: 30, analysis_days: 90, conservative_win_rate: true };
@@ -10,6 +10,9 @@ const money = (s: string | number | null | undefined) => s == null ? "Sin datos"
   new Intl.NumberFormat("es-PE", { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format(Number(s));
 const sol = (s: string | null | undefined) => s == null ? "Sin datos" : `${Number(s).toLocaleString("es-PE", { maximumFractionDigits: 4 })} SOL`;
 const roi = (s: string | null | undefined) => s == null ? "Desconocido" : `${Number(s).toFixed(1)}%`;
+const ACTIVE_JOB = ["queued", "running", "cancel_requested"];
+const jobStates: Record<string, string> = { queued: "En cola", running: "Sincronizando", cancel_requested: "Cancelando…",
+  done: "Completado", failed: "Falló", cancelled: "Cancelado" };
 const kinds: Record<string, string> = { buy: "Compra", sell: "Venta", transfer_in: "Entrada", transfer_out: "Salida" };
 const pct = (n: number | null | undefined) => n == null ? "Sin datos" : `${(n * 100).toFixed(1)}%`;
 const date = (s: string) => new Intl.DateTimeFormat("es-PE", { dateStyle: "medium", timeStyle: "short", timeZone: "America/Lima" }).format(new Date(s));
@@ -77,6 +80,9 @@ export default function Tracker() {
   const [observationOffset, setObservationOffset] = useState(0);
   const [chain, setChain] = useState<ChainPositions | null>(null);
   const [trades, setTrades] = useState<ChainTrade[]>([]);
+  const [jobs, setJobs] = useState<Job[]>([]);
+  const [worker, setWorker] = useState<WorkerStatus | null>(null);
+  const [jobsVersion, setJobsVersion] = useState(0);
   const [verifyOffset, setVerifyOffset] = useState(0);
   const [rankings, setRankings] = useState<{ address: string; label: string; metrics: Analysis["metrics"] }[]>([]);
   const [busy, setBusy] = useState("");
@@ -88,6 +94,8 @@ export default function Tracker() {
   const [seed, setSeed] = useState("");
   const [expanded, setExpanded] = useState("");
   const wallet = wallets.find(w => w.address === selected);
+  const activeJob = jobs.find(j => ACTIVE_JOB.includes(j.state));
+  const lastJob = jobs[0];
 
   const reloadWallets = useCallback(async () => {
     const list = await api<{items: Wallet[]; total: number}>("/wallets?limit=200");
@@ -123,6 +131,36 @@ export default function Tracker() {
     return () => { active = false; };
   }, [filters, wallets]);
 
+  // Worker status for the top bar, also when no wallet is selected.
+  useEffect(() => {
+    let active = true;
+    const load = () => api<WorkerStatus>("/worker").then(w => { if (active) setWorker(w); }).catch(() => {});
+    load(); const timer = setInterval(load, 15000);
+    return () => { active = false; clearInterval(timer); };
+  }, []);
+
+  // Poll the selected wallet's jobs: fast while one is active, slow otherwise. Each finished round
+  // refreshes the wallet so the analysis grows as the background sync advances.
+  useEffect(() => {
+    let active = true; let timer: ReturnType<typeof setTimeout> | undefined;
+    let lastFinished: number | null = null;
+    setJobs([]);
+    async function tick() {
+      if (!selected) return;
+      try {
+        const r = await api<{ items: Job[]; worker: WorkerStatus }>(`/jobs?wallet=${selected}&limit=5`);
+        if (!active) return;
+        setJobs(r.items); setWorker(r.worker);
+        const finished = r.items.find(j => !ACTIVE_JOB.includes(j.state))?.id ?? null;
+        if (lastFinished !== null && finished !== lastFinished) await reloadWallets();
+        lastFinished = finished;
+        timer = setTimeout(tick, r.items.some(j => ACTIVE_JOB.includes(j.state)) ? 2000 : 15000);
+      } catch { if (active) timer = setTimeout(tick, 15000); }
+    }
+    tick();
+    return () => { active = false; if (timer) clearTimeout(timer); };
+  }, [selected, jobsVersion, reloadWallets]);
+
   async function action(name: string, task: () => Promise<void>) {
     setBusy(name); setError(""); setNotice("");
     try { await task(); } catch (e) { setError(e instanceof Error ? e.message : "Error inesperado"); }
@@ -139,11 +177,17 @@ export default function Tracker() {
   }
   async function sync() {
     await action("sync", async () => {
-      const r = await api<{state: string; transactions: number; trades: number; rpc_transaction_fetches: number; issues: string[];
-        pricing?: { priced?: number; unpriced?: number; error?: string }}>(`/wallets/${selected}/sync`,
-        post({ days: filters.analysis_days, max_pages: 2, page_size: 10 }));
-      await reloadWallets();
-      setNotice(`${r.transactions} transacciones nuevas (${r.rpc_transaction_fetches} descargadas del RPC), ${r.trades} operaciones detectadas. ${r.pricing?.error ? `Precios no disponibles: ${r.pricing.error}. ` : r.pricing?.unpriced ? `${r.pricing.unpriced} operaciones sin precio USD todavía; pulsa «Valorar en USD». ` : ""}${r.state === "partial" ? "Historial parcial: " + r.issues.join(", ") + ". Vuelve a sincronizar para continuar desde el cursor." : "Ventana de firmas escaneada."}`);
+      const r = await api<{ job: Job; created: boolean }>(`/wallets/${selected}/jobs`, post({ days: filters.analysis_days }));
+      setJobsVersion(v => v + 1);
+      setNotice(r.created ? "Sincronización en cola. Se ejecuta en segundo plano, por rondas, hasta completar la ventana; puedes seguir trabajando."
+        : "Ya hay una sincronización en curso para esta wallet.");
+    });
+  }
+  async function cancelJob(job: Job) {
+    await action("cancel", async () => {
+      await api(`/jobs/${job.id}/cancel`, post({}));
+      setJobsVersion(v => v + 1);
+      setNotice("Cancelación solicitada: se detiene tras la transacción en curso. Lo ya guardado se conserva.");
     });
   }
   async function importFile(file: File) {
@@ -170,7 +214,9 @@ export default function Tracker() {
     </aside>
     <main>
       <header className="topbar"><span>Investigación <span className="slash">/</span> {tabs.find(t => t.id === tab)?.name}</span>
-        <div className="network-pill"><span className={config ? "status-dot" : "status-dot muted-dot"} />{config ? "Backend conectado" : "Conectando…"}</div></header>
+        <div className="pills"><div className="network-pill" title={worker?.alive ? `Watchlist cada ${worker.workers[0]?.info?.refresh_minutes ?? "?"} min` : "Sin worker: las sincronizaciones quedan en cola"}>
+          <span className={worker?.alive ? "status-dot" : "status-dot muted-dot"} />{worker?.alive ? `Worker activo${worker.queued ? ` · ${worker.queued} en cola` : ""}` : "Worker detenido"}</div>
+          <div className="network-pill"><span className={config ? "status-dot" : "status-dot muted-dot"} />{config ? "Backend conectado" : "Conectando…"}</div></div></header>
       <div className="content">
         <div className="page-heading"><div><div className="eyebrow">EVIDENCIA ANTES QUE RENDIMIENTO</div>
           <h1>Encuentra habilidad.<br className="mobile-break"/><span> Exige pruebas.</span></h1>
@@ -225,7 +271,7 @@ export default function Tracker() {
                 <div className="section-heading"><div><div className="eyebrow">PERFIL DE INVESTIGACIÓN</div><h2>{wallet.label || short(selected)}</h2></div><span className="badge warning">{analysis?.eligible ? "Validado" : "Evidencia insuficiente"}</span></div>
                 <a className="address" href={`https://solscan.io/account/${selected}`} target="_blank" rel="noreferrer">{selected} ↗</a>
                 {wallet.identity && <p className="muted">@{wallet.identity.handle} · Asociación declarada por {wallet.identity.source}; sin verificación independiente.</p>}
-                <div className="toolbar"><button className="primary" disabled={!!busy} onClick={sync}>{busy === "sync" ? "Consultando Solana…" : "Sincronizar on-chain"}</button>
+                <div className="toolbar"><button className="primary" disabled={!!busy || !!activeJob} onClick={sync}>{activeJob ? "Sincronizando…" : busy === "sync" ? "Encolando…" : "Sincronizar on-chain"}</button>
                   <label className={`secondary file-button ${busy ? "disabled" : ""}`}>Importar ledger JSON<input aria-label="Importar ledger JSON" type="file" accept="application/json,.json" disabled={!!busy}
                     onChange={e => { const f = e.target.files?.[0]; if (f) importFile(f); e.target.value = ""; }}/></label>
                   <button className="quiet" disabled={!!busy} onClick={() => action("verify", async () => {
@@ -239,7 +285,13 @@ export default function Tracker() {
                     await reloadWallets();
                     setNotice(`${r.priced} operaciones valoradas en USD, ${r.market_caps} con market cap verificado${r.unpriced ? `, ${r.unpriced} pendientes (vuelve a pulsar)` : ""}.`);
                   })}>{busy === "price" ? "Valorando…" : "Valorar en USD"}</button></div>
-                {wallet.sync && <p className="sync-note">Último escaneo: {wallet.sync.state} · {wallet.sync.transactions} transacciones · {wallet.sync.signature_window_complete ? "ventana de firmas escaneada" : "cobertura parcial"}. El análisis usa el estado de este escaneo.</p>}
+                {activeJob && <div className="sync-note job-note" role="status"><span><span className={activeJob.state === "queued" && !worker?.alive ? "status-dot muted-dot" : "status-dot"} />
+                  {jobStates[activeJob.state]} · ronda {activeJob.round} de máx. {activeJob.params.max_rounds} · {activeJob.progress?.transactions ?? 0} transacciones nuevas en esta ronda · {activeJob.progress?.pages ?? 0} {activeJob.progress?.pages === 1 ? "página" : "páginas"}
+                  {activeJob.error ? ` · reintento ${activeJob.attempts}: ${activeJob.error}` : ""}</span>
+                  {activeJob.state !== "cancel_requested" && <button className="quiet" disabled={!!busy} onClick={() => cancelJob(activeJob)}>Cancelar</button>}</div>}
+                {activeJob?.state === "queued" && worker && !worker.alive && <p className="risk">No hay ningún worker activo: el trabajo espera en cola. Inicia <code>uv run python -m tracker.worker</code> en <code>backend/</code>.</p>}
+                {!activeJob && lastJob?.state === "failed" && <p className="risk">La última sincronización falló: {lastJob.error}</p>}
+                {!activeJob && wallet.sync && <p className="sync-note">Último escaneo: {wallet.sync.state} · {observationTotal} transacciones guardadas ({wallet.sync.transactions} nuevas en la última ronda) · {wallet.sync.signature_window_complete ? "ventana de firmas escaneada" : "cobertura parcial"}. El análisis usa el estado de este escaneo.</p>}
                 {analysis ? <>
                   <div className="profile-metrics">{[
                     ["PnL realizado (USD)",money(analysis.metrics.net_realized_pnl_usd)],

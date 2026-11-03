@@ -31,7 +31,10 @@ La verificación independiente no se delega en frases de marketing del proveedor
 - Tablas de wallets, capturas RPC inmutables, observaciones, eventos declarados, snapshots y capturas privadas de fuente.
 - Adaptadores separados para Solana y FOMO API; otras redes requieren su propio normalizador, no reutilizar
   contabilidad de balances nativos Solana sin adaptar sus reglas.
-- No Redis ni worker permanente aún: tareas acotadas síncronas; se informa cobertura parcial, no se finge tiempo real.
+- Cola de trabajos en la propia base de datos (tabla `jobs`) y un worker de fondo (`python -m tracker.worker`), sin Redis:
+  basta para un investigador y un único worker. Reclamo con UPDATE condicional, rondas encadenadas, reintentos con
+  espera exponencial, recuperación por latido y refresco periódico de la watchlist. No es tiempo real: el refresco
+  es por intervalo (noviembre de 2026).
 - CI ejecuta contabilidad y API con fixtures sintéticos, más types/build del frontend. No usa claves ni escanea wallets.
 
 ## Primera fase y límites

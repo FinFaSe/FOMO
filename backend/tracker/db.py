@@ -2,7 +2,17 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    create_engine,
+    event,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 
@@ -117,6 +127,39 @@ class PriceCandle(Base):
     fetched_at: Mapped[str] = mapped_column(String(40), default=now_iso)
 
 
+class Job(Base):
+    """Background work item. Rows are claimed by a conditional UPDATE, so one runner wins each job."""
+
+    __tablename__ = "jobs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(20), default="sync")
+    wallet: Mapped[str] = mapped_column(ForeignKey("wallets.address"), index=True)
+    # queued → running → done | failed | cancelled; cancel_requested is honored between transactions.
+    state: Mapped[str] = mapped_column(String(20), index=True, default="queued")
+    params: Mapped[dict] = mapped_column(JSON)
+    origin: Mapped[str] = mapped_column(String(20), default="manual")  # manual | api | schedule | chain
+    parent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    round: Mapped[int] = mapped_column(Integer, default=1)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    run_after: Mapped[str] = mapped_column(String(40), default=now_iso, index=True)
+    locked_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+    started_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    heartbeat_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    finished_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    progress: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class WorkerHeartbeat(Base):
+    __tablename__ = "workers"
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    started_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+    heartbeat_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+    info: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
 class AnalysisSnapshot(Base):
     __tablename__ = "analysis_snapshots"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -140,6 +183,18 @@ def database(url: str | None = None):
     url = url or os.getenv("DATABASE_URL", "sqlite:///./.data/tracker.db")
     if url.startswith("sqlite"):
         Path(".data").mkdir(exist_ok=True)
-    engine = create_engine(url, connect_args={"check_same_thread": False} if url.startswith("sqlite") else {})
+    if url.startswith("sqlite"):
+        # The API and the background worker are separate processes: wait for locks instead of failing,
+        # and use WAL so readers are not blocked by the writer.
+        engine = create_engine(url, connect_args={"check_same_thread": False, "timeout": 30})
+
+        @event.listens_for(engine, "connect")
+        def _sqlite_pragmas(connection, _record):
+            cursor = connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.close()
+    else:
+        engine = create_engine(url, pool_pre_ping=True)
     Base.metadata.create_all(engine)
     return engine, sessionmaker(engine, expire_on_commit=False)

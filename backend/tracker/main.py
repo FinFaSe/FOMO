@@ -2,6 +2,7 @@ import hmac
 import json
 import os
 import threading
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Annotated
 
@@ -13,12 +14,24 @@ from sqlalchemy import func, select
 from .adapters.fomo import FomoAPI
 from .adapters.prices import CoinbaseCandles
 from .adapters.solana import ProviderError, SolanaRPC, digest, observe
-from .db import AnalysisSnapshot, Observation, RawTransaction, SourceCapture, Trade, Wallet, database, now_iso
+from .db import (
+    AnalysisSnapshot,
+    Job,
+    Observation,
+    RawTransaction,
+    SourceCapture,
+    Trade,
+    Wallet,
+    database,
+    now_iso,
+)
+from .jobs import Worker, cancel, enqueue, ensure_idle, job_json, run_inline, worker_status
 from .pricing import price_trades
 from .schemas import (
     DiscoveryRequest,
     Filters,
     FomoResolve,
+    JobRequest,
     LedgerImport,
     SyncRequest,
     WalletCreate,
@@ -26,13 +39,24 @@ from .schemas import (
     address,
     utc,
 )
-from .service import chain_positions, import_ledger, ingest, renormalize, verify_ledger, wallet_analysis
+from .service import chain_positions, import_ledger, renormalize, verify_ledger, wallet_analysis
 
 
 def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None) -> FastAPI:
-    app = FastAPI(title="FOMO Smart Money Tracker", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(app):
+        # Optional single-process mode for local use; production runs `python -m tracker.worker`.
+        stop = threading.Event()
+        if os.getenv("TRACKER_EMBEDDED_WORKER") == "1":
+            worker = Worker(sessions, rpc, prices)
+            threading.Thread(target=worker.run_forever, args=(stop,), daemon=True, name="tracker-worker").start()
+        yield
+        stop.set()
+
+    app = FastAPI(title="FOMO Smart Money Tracker", version="0.1.0", lifespan=lifespan)
     engine, sessions = database(db_url)
     app.state.engine = engine
+    app.state.sessions = sessions
     rpc = rpc or SolanaRPC()
     fomo = fomo or FomoAPI()
     prices = prices or CoinbaseCandles()
@@ -135,21 +159,47 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None) -> F
 
     @app.post("/api/wallets/{wallet}/sync", dependencies=[Depends(write_guard)])
     def sync(wallet: str, body: SyncRequest, s=Depends(session)):
-        w = get_wallet(s, wallet)
-        report = ingest(s, w, rpc, body)
-        try:
-            report["pricing"] = price_trades(s, wallet, prices)
-        except ProviderError as exc:
-            # Prices are best effort; trades stay unpriced (and non-evaluable) until a later attempt.
-            s.rollback()
-            report["pricing"] = {"error": exc.message}
-        w.sync = report
-        s.commit()
-        return report
+        # Synchronous, bounded run (scripts, tests). The dashboard queues background jobs instead.
+        return run_inline(s, get_wallet(s, wallet), rpc, prices, body)
+
+    @app.post("/api/wallets/{wallet}/jobs", status_code=202)
+    def queue_sync(wallet: str, body: JobRequest, s=Depends(session)):
+        get_wallet(s, wallet)
+        job, created = enqueue(s, wallet, body)
+        return {"job": job_json(job), "created": created}
+
+    @app.get("/api/jobs")
+    def jobs(wallet: str | None = None, state: str | None = None, limit: int = Query(20, ge=1, le=100),
+             s=Depends(session)):
+        query = select(Job).order_by(Job.id.desc()).limit(limit)
+        if wallet:
+            query = query.where(Job.wallet == wallet)
+        if state:
+            query = query.where(Job.state == state)
+        return {"items": [job_json(j) for j in s.scalars(query)], "worker": worker_status(s)}
+
+    @app.get("/api/jobs/{job_id}")
+    def job(job_id: int, s=Depends(session)):
+        row = s.get(Job, job_id)
+        if not row:
+            raise HTTPException(404, "Trabajo no encontrado")
+        return job_json(row)
+
+    @app.post("/api/jobs/{job_id}/cancel")
+    def cancel_job(job_id: int, s=Depends(session)):
+        row = s.get(Job, job_id)
+        if not row:
+            raise HTTPException(404, "Trabajo no encontrado")
+        return job_json(cancel(s, row))
+
+    @app.get("/api/worker")
+    def worker(s=Depends(session)):
+        return worker_status(s)
 
     @app.post("/api/wallets/{wallet}/price", dependencies=[Depends(write_guard)])
     def price(wallet: str, s=Depends(session)):
         get_wallet(s, wallet)
+        ensure_idle(s, wallet)
         return price_trades(s, wallet, prices)
 
     @app.post("/api/wallets/{wallet}/ledger", dependencies=[Depends(write_guard)])
@@ -161,6 +211,7 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None) -> F
     def verify(wallet: str, limit: int = Query(50, ge=1, le=50), offset: int = Query(0, ge=0),
                s=Depends(session)):
         get_wallet(s, wallet)
+        ensure_idle(s, wallet)
         return verify_ledger(s, wallet, rpc, limit=limit, offset=offset)
 
     @app.get("/api/wallets/{wallet}/observations")
@@ -195,6 +246,7 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None) -> F
     @app.post("/api/wallets/{wallet}/normalize", dependencies=[Depends(write_guard)])
     def normalize_wallet(wallet: str, s=Depends(session)):
         get_wallet(s, wallet)
+        ensure_idle(s, wallet)
         rebuilt = renormalize(s, wallet)
         rebuilt["pricing"] = price_trades(s, wallet, None)  # cached candles only: no network
         return rebuilt
