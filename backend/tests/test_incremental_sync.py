@@ -12,7 +12,7 @@ from tracker.db import Observation
 from tracker.main import create_app
 
 from .conftest import WALLET
-from .test_api import SIG, SyntheticPrices, SyntheticRPC, ledger_event
+from .test_api import SIG, SyntheticPrices, SyntheticQuotes, SyntheticRPC, ledger_event
 
 HOUR = 3600
 SYNC = f"/api/wallets/{WALLET}/sync"
@@ -21,7 +21,8 @@ SYNC = f"/api/wallets/{WALLET}/sync"
 @pytest.fixture
 def client(tmp_path):
     rpc = SyntheticRPC()
-    app = create_app(f"sqlite:///{tmp_path}/incremental.db", rpc=rpc, prices=SyntheticPrices())
+    app = create_app(f"sqlite:///{tmp_path}/incremental.db", rpc=rpc, prices=SyntheticPrices(),
+                     quotes=SyntheticQuotes())
     with TestClient(app) as c:
         c.post("/api/wallets", json={"address": WALLET, "label": "SYNTHETIC TEST"})
         yield c, rpc

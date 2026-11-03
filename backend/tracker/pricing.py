@@ -3,11 +3,14 @@
 - SOL-quoted trades: amount × SOL/USD close of the Coinbase 1-minute candle containing the block time
   (nearest candle within 5 minutes if that minute had no ticks). The candle's low/high is kept.
 - USDC/USDT-quoted trades: valued at par (method `stablecoin_par`). Network fees still need SOL/USD.
-- Market cap = USD price per token × supply bound. It is `verified` only for pump.fun mints: any stored
-  transaction where the bonding-curve program traded that mint proves its origin, and pump.fun mints
-  are created with a fixed supply of 1,000,000,000 tokens (6 decimals) and no mint authority. Burns can
-  only lower the supply, so 1e9 is an upper bound: the cap is never understated against the maximum
-  entry-cap filter. Other mints keep `market_cap: unknown`.
+- Market cap = USD price per token × supply bound. It is `verified` only for pump.fun mints: a stored
+  bonding-curve trade of that mint (any wallet) or its existing bonding-curve account proves its origin,
+  and pump.fun mints are created with a fixed supply of 1,000,000,000 tokens (6 decimals) and no mint
+  authority. Burns can only lower the supply, so 1e9 is an upper bound: the cap is never understated
+  against the maximum entry-cap filter.
+- Other mints without mint authority get an `estimated` cap from their current supply (it may understate
+  the entry cap if tokens were burned later), shown for research but not accepted by the ranking.
+  Mints whose authority can still mint keep `market_cap: unknown`.
 """
 
 from datetime import datetime, timezone
@@ -16,7 +19,7 @@ from decimal import Decimal
 from sqlalchemy import select
 
 from .adapters.prices import MAX_CANDLES
-from .db import PriceCandle, Trade
+from .db import PriceCandle, TokenMint, Trade
 
 PUMPFUN_SUPPLY = Decimal(1_000_000_000)
 PUMPFUN_DECIMALS = 6
@@ -54,15 +57,31 @@ def _neighborhoods(times: list[int]) -> list[int]:
 
 
 def _pump_mints(session, mints: set[str]) -> set[str]:
-    """Mints that some stored transaction traded on the pump.fun bonding curve (any wallet)."""
+    """Mints proven to come from pump.fun: a stored bonding-curve trade (any wallet) or an existing
+    bonding-curve account owned by the pump.fun program (`token_mints.pump_origin`)."""
     found: set[str] = set()
     ordered = sorted(mints)
     for i in range(0, len(ordered), 500):
-        for mint, details in session.execute(select(Trade.mint, Trade.details)
-                                             .where(Trade.mint.in_(ordered[i:i + 500]))):
+        chunk = ordered[i:i + 500]
+        for mint, details in session.execute(select(Trade.mint, Trade.details).where(Trade.mint.in_(chunk))):
             if "pump.fun" in (details.get("venues") or []):
                 found.add(mint)
+        found.update(session.scalars(select(TokenMint.mint).where(TokenMint.mint.in_(chunk),
+                                                                  TokenMint.pump_origin.is_(True))))
     return found
+
+
+def _market_cap(price_usd: Decimal, decimals: int | None, is_pump: bool, facts: TokenMint | None):
+    """(market cap, method, supply used, evidence status) for one trade."""
+    if is_pump and decimals == PUMPFUN_DECIMALS:
+        return price_usd * PUMPFUN_SUPPLY, "pumpfun_fixed_supply_upper_bound", PUMPFUN_SUPPLY, "verified"
+    if (facts is not None and facts.exists and facts.supply_raw is not None and facts.mint_authority is None
+            and facts.decimals is not None and facts.decimals == decimals):
+        # No mint authority: supply can only have shrunk (burns) since it was revoked, so the current
+        # supply may understate the supply at entry. Shown as an estimate, never used for the ranking.
+        supply = Decimal(facts.supply_raw) / Decimal(10) ** facts.decimals
+        return price_usd * supply, "current_supply_mint_authority_revoked", supply, "estimated"
+    return None, None, None, "unknown"
 
 
 def price_trades(session, wallet: str, prices, *, max_requests: int = 20) -> dict:
@@ -70,10 +89,12 @@ def price_trades(session, wallet: str, prices, *, max_requests: int = 20) -> dic
 
     rows = [t for t in session.scalars(select(Trade).where(Trade.wallet == wallet))
             if t.kind in ("buy", "sell") and t.block_time is not None and t.details.get("quote_asset")]
-    pump = _pump_mints(session, {t.mint for t in rows})
-    pending = [t for t in rows if _needs_usd(t) or (
-        t.mint in pump and (t.details.get("usd") or {}).get("market_cap_usd") is None)]
-    report = {"priced": 0, "unpriced": 0, "market_caps": 0, "price_requests": 0,
+    mints = {t.mint for t in rows}
+    pump = _pump_mints(session, mints)
+    facts = {m.mint: m for m in session.scalars(select(TokenMint).where(TokenMint.mint.in_(sorted(mints))))}
+    # Unpriced trades, plus priced ones whose cap is not verified yet (new mint facts may settle it).
+    pending = [t for t in rows if _needs_usd(t) or t.details["evidence"].get("market_cap") != "verified"]
+    report = {"priced": 0, "unpriced": 0, "market_caps": 0, "estimated_caps": 0, "price_requests": 0,
               "source": None, "issues": []}
     if not pending:
         return report
@@ -126,18 +147,22 @@ def price_trades(session, wallet: str, prices, *, max_requests: int = 20) -> dic
                    "fees_usd": str(fees) if fees is not None else None,
                    "price_usd": str(gross / Decimal(d["token_amount"])) if gross is not None else None,
                    "market_cap_usd": None, "market_cap_method": None, "supply_bound": None}
-        if usd.get("price_usd") is not None and t.mint in pump and d.get("decimals") == PUMPFUN_DECIMALS:
-            usd["market_cap_usd"] = str(Decimal(usd["price_usd"]) * PUMPFUN_SUPPLY)
-            usd["market_cap_method"] = "pumpfun_fixed_supply_upper_bound"
-            usd["supply_bound"] = str(PUMPFUN_SUPPLY)
+        cap_status = "unknown"
+        if usd.get("price_usd") is not None:
+            cap, method, supply, cap_status = _market_cap(Decimal(usd["price_usd"]), d.get("decimals"),
+                                                          t.mint in pump, facts.get(t.mint))
+            usd["market_cap_usd"] = str(cap) if cap is not None else None
+            usd["market_cap_method"], usd["supply_bound"] = method, str(supply) if supply is not None else None
         priced = usd.get("gross_usd") is not None and usd.get("fees_usd") is not None
-        evidence = {**d["evidence"], "usd": "verified" if priced else "unpriced",
-                    "market_cap": "verified" if usd.get("market_cap_usd") is not None else "unknown",
-                    "valued_at": datetime.now(timezone.utc).isoformat()}
+        evidence = {**d["evidence"], "usd": "verified" if priced else "unpriced", "market_cap": cap_status}
+        if usd == d.get("usd") and evidence == d["evidence"]:
+            continue  # nothing new for this trade
+        evidence["valued_at"] = datetime.now(timezone.utc).isoformat()
         t.details = {**d, "usd": usd, "evidence": evidence}  # reassign: JSON columns track assignment
         report["priced"] += int(priced)
         report["unpriced"] += int(not priced)
-        report["market_caps"] += int(usd.get("market_cap_usd") is not None)
+        report["market_caps"] += int(cap_status == "verified")
+        report["estimated_caps"] += int(cap_status == "estimated")
     report["source"] = source
     session.commit()
     return report

@@ -160,6 +160,42 @@ class WorkerHeartbeat(Base):
     info: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
+class TokenMint(Base):
+    """On-chain mint facts (getMultipleAccounts) plus proof of pump.fun origin. Refreshed periodically."""
+
+    __tablename__ = "token_mints"
+    mint: Mapped[str] = mapped_column(String(44), primary_key=True)
+    exists: Mapped[bool] = mapped_column(Boolean, default=True)
+    program: Mapped[str | None] = mapped_column(String(44), nullable=True)
+    decimals: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    supply_raw: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    mint_authority: Mapped[str | None] = mapped_column(String(44), nullable=True)
+    freeze_authority: Mapped[str | None] = mapped_column(String(44), nullable=True)
+    extensions: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # pump.fun bonding-curve PDA for this mint and whether an account owned by pump.fun exists there.
+    pump_bonding_curve: Mapped[str | None] = mapped_column(String(44), nullable=True)
+    pump_origin: Mapped[bool] = mapped_column(Boolean, default=False)
+    source: Mapped[str] = mapped_column(String(200))
+    fetched_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+
+
+class TokenQuote(Base):
+    """Latest market quote for a mint (mark price). Volatile: never part of an immutable snapshot."""
+
+    __tablename__ = "token_quotes"
+    mint: Mapped[str] = mapped_column(String(44), primary_key=True)
+    found: Mapped[bool] = mapped_column(Boolean, default=False)
+    price_usd: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    liquidity_usd: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    market_cap_usd: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    fdv_usd: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    pair_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dex_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    symbol: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    source: Mapped[str] = mapped_column(String(200))
+    fetched_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+
+
 class AnalysisSnapshot(Base):
     __tablename__ = "analysis_snapshots"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)

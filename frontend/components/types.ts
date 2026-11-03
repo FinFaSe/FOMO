@@ -79,3 +79,15 @@ export type WorkerStatus = {
   alive: boolean; queued: number; running: number;
   workers: { id: string; heartbeat_at: string; alive: boolean; info: { refresh_minutes?: number } | null }[];
 };
+export type OpenPosition = {
+  token: string; cycle: number; opened_at: string; symbol: string | null; quantity: string;
+  cost_basis_usd: string | null; price_usd: string | null; value_usd: string | null;
+  unrealized_pnl_usd: string | null; unrealized_pct: string | null; liquidity_usd: string | null;
+  current_market_cap_usd: string | null; dex_id: string | null; quote_fetched_at: string | null;
+  quote_found: boolean; issues: string[]; risks: string[];
+};
+export type OpenPositions = {
+  as_of: string; positions: OpenPosition[]; issues: string[]; quote_source: string | null;
+  totals: { open_positions: number; valued_positions: number; value_usd: string; cost_basis_usd: string;
+    unrealized_pnl_usd: string };
+};

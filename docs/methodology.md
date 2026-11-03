@@ -54,7 +54,26 @@ decodificar instrucciones, de modo que cualquier ruta por un venue reconocido se
   operación guardada contra la bonding curve de pump.fun (prueba de origen) y 6 decimales: se crean con
   1.000.000.000 tokens y sin autoridad de emisión, y las quemas solo reducen el suministro, así que el market cap
   nunca queda subestimado frente al filtro de market cap máximo. El resto de mints queda `unknown`.
+- Prueba de origen pump.fun: una operación guardada contra la bonding curve, o una cuenta propiedad del programa
+  de pump.fun en la PDA `["bonding-curve", mint]` (derivada con `solders`, leída con `getMultipleAccounts`).
+- Mints sin esa prueba y sin autoridad de emisión: market cap `estimated` = precio × suministro actual. Sin
+  autoridad nadie puede emitir, pero las quemas posteriores a la entrada reducen el suministro actual, así que la
+  estimación puede quedar por debajo del real: se muestra y se usa en métricas exploratorias, nunca en el ranking.
+  Con autoridad de emisión activa: `unknown`.
 - Pyth Benchmarks no se usa: su endpoint público TradingView se retiró el 26 de agosto de 2026.
+
+## Orden dentro del mismo segundo
+
+`blockTime` tiene resolución de un segundo. Los fills de la cadena llevan su slot: transacciones del mismo mint en
+el mismo segundo pero en slots distintos se ordenan por slot y no son ambiguas. En el mismo slot el orden
+intrabloque es desconocido (no se consulta `getBlock`) y la posición se marca `ambiguous_transaction_order`, igual
+que los empates sin slot (ledger importado).
+
+## Posiciones abiertas
+
+PnL no realizado = cantidad × precio actual − costo remanente (costo promedio ponderado). Precio del par con más
+liquidez USD en DEX Screener donde el mint es el token base; caché de 60 s. Es una marca de mercado, no un precio de
+ejecución, y no forma parte de snapshots ni del ranking.
 
 ## Historial completo
 

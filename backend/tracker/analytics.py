@@ -33,6 +33,8 @@ class Fill:
     market_cap_usd: Decimal | None
     source_url: str
     evidence: dict = field(default_factory=dict)
+    # Slot of the transaction when known (chain-derived fills). Orders fills that share a block time.
+    slot: int | None = None
 
 
 @dataclass
@@ -80,14 +82,20 @@ def reconstruct(fills: list[Fill], as_of: datetime) -> list[Position]:
     current: dict[str, Position] = {}
     counts: dict[str, int] = defaultdict(int)
     output: list[Position] = []
-    # Signature order breaks timestamp ties deterministically, but cannot establish intrablock order.
-    # A tied timestamp for the same mint across signatures is marked ambiguous below.
-    timestamps = defaultdict(set)
+    # Block times have one-second resolution. Different slots order transactions that share a second;
+    # inside one slot the economic order is unknown (no intrablock index), so such ties stay ambiguous,
+    # as do ties without a known slot (imported ledgers). Signature order only makes sorting deterministic.
+    slots_by_second = defaultdict(dict)
     for f in fills:
         if f.timestamp <= as_of:
-            timestamps[(f.token, f.timestamp)].add(f.signature)
+            slots_by_second[(f.token, f.timestamp)][f.signature] = f.slot
+    ambiguous = set()
+    for key, slots in slots_by_second.items():
+        if len(slots) > 1 and (None in slots.values() or len(set(slots.values())) < len(slots)):
+            ambiguous.add(key)
     for f in sorted((f for f in fills if f.timestamp <= as_of),
-                    key=lambda f: (f.timestamp, f.signature, f.event_index, f.token)):
+                    key=lambda f: (f.timestamp, f.slot if f.slot is not None else -1, f.signature,
+                                   f.event_index, f.token)):
         p = current.get(f.token)
         if p is None:
             counts[f.token] += 1
@@ -95,7 +103,7 @@ def reconstruct(fills: list[Fill], as_of: datetime) -> list[Position]:
             output.append(p)
             current[f.token] = p
         p.fills.append(f)
-        if len(timestamps[(f.token, f.timestamp)]) > 1:
+        if (f.token, f.timestamp) in ambiguous:
             p.issues.add("ambiguous_transaction_order")
         if f.evidence.get("movement") in ("mismatch", "unavailable"):
             p.issues.add("chain_evidence_mismatch")

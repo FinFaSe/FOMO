@@ -85,18 +85,28 @@ La correlación entre tokens aún puede reducir la independencia. Ver [método](
    de la vela de 1 minuto de Coinbase que contiene el bloque (o la más cercana a ≤5 min); USDC y USDT a la
    par. El market cap de entrada solo es `verified` para mints de pump.fun (su origen lo prueba cualquier
    operación guardada contra la bonding curve): precio USD × 1.000 millones, el suministro fijo con que se
-   crean, que es un límite superior porque las quemas solo lo reducen. Otros mints quedan `unknown`.
+   crean, que es un límite superior porque las quemas solo lo reducen. El origen también se prueba si existe
+   la cuenta de bonding curve del mint (PDA `["bonding-curve", mint]` del programa de pump.fun), así que los
+   tokens graduados a PumpSwap o Raydium cuentan aunque la wallet no operara en la curva. Para el resto, la
+   sync lee cada mint (`getMultipleAccounts`, caché 24 h): sin autoridad de emisión, el market cap se
+   **estima** con el suministro actual (`estimated`, «≈» en el dashboard; puede subestimarse si hubo quemas
+   después, por eso el ranking no lo acepta); con autoridad de emisión activa queda `unknown`.
    Las velas se guardan en caché; `POST /api/wallets/{wallet}/price` completa lo pendiente (máx. 20
    peticiones por llamada). Estas operaciones alimentan el análisis en USD y el ranking. La vista en SOL
    (`GET /api/wallets/{wallet}/chain-positions`) sigue disponible. `POST /api/wallets/{wallet}/normalize`
    reconstruye las operaciones desde la evidencia guardada; al cambiar la versión del normalizador se
    reconstruyen en la siguiente sync.
-4. Opcional: importa un ledger JSON documentado. Si la cadena ya aporta el evento de la misma firma y mint,
+4. **Posiciones abiertas** (`GET /api/wallets/{wallet}/open-positions`): cantidad, costo, precio actual, valor,
+   PnL no realizado, liquidez y riesgos del token (autoridad de congelación o de emisión activa, extensiones
+   Token-2022 restrictivas, liquidez < USD 10.000). Precio del par más líquido en DEX Screener, caché de 1 min;
+   si la fuente falla se muestran las últimas cotizaciones con aviso. Es precio de mercado, no de ejecución, y
+   no entra en snapshots ni ranking. `GET /api/tokens/{mint}` devuelve los datos guardados de un token.
+5. Opcional: importa un ledger JSON documentado. Si la cadena ya aporta el evento de la misma firma y mint,
    prevalece el de la cadena.
    La importación es una declaración externa, **no** evidencia verificada por sí misma.
-5. **Verificar ledger** comprueba fecha y delta neto del token contra el RPC. No valida
+6. **Verificar ledger** comprueba fecha y delta neto del token contra el RPC. No valida
    automáticamente que fuera un swap ni sus precios históricos USD o capitalización.
-6. Examina métricas exploratorias, exclusiones y snapshot; añade wallets a la watchlist.
+7. Examina métricas exploratorias, exclusiones y snapshot; añade wallets a la watchlist.
 
 Formato del ledger (números decimales como strings; ver modelo `LedgerImport` en OpenAPI):
 
@@ -148,6 +158,7 @@ Variables opcionales:
 | `DATABASE_URL` | Por defecto SQLite; PostgreSQL usa `postgresql+psycopg://…` |
 | `SOLANA_RPC_URL` | RPC HTTPS, por defecto `https://api.mainnet-beta.solana.com` |
 | (sin variable) | Precios: `https://api.exchange.coinbase.com`, público y sin clave |
+| (sin variable) | Cotizaciones actuales: `https://api.dexscreener.com`, público y sin clave |
 | `FOMO_API_KEY` | Bearer para `api.fomoapi.io`, solo servidor |
 | `BACKEND_URL` | En Next, por defecto `http://127.0.0.1:8000` |
 | `TRACKER_ACCESS_TOKEN` | Opcional: protege la API; Next lo adjunta del lado servidor |

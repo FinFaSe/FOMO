@@ -18,10 +18,11 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select, update
 
 from .adapters.solana import ProviderError
-from .db import Job, Wallet, WorkerHeartbeat, now_iso
+from .db import Job, Trade, Wallet, WorkerHeartbeat, now_iso
 from .pricing import price_trades
 from .schemas import JobRequest, SyncRequest
 from .service import ingest
+from .tokens import refresh_mints
 
 log = logging.getLogger("tracker.jobs")
 ACTIVE = ("queued", "running", "cancel_requested")
@@ -90,6 +91,14 @@ def cancel(session, job: Job) -> Job:
 
 def sync_and_price(session, wallet: Wallet, rpc, prices, request: SyncRequest, on_progress=None) -> dict:
     report = ingest(session, wallet, rpc, request, on_progress)
+    mints = set(session.scalars(select(Trade.mint).where(Trade.wallet == wallet.address,
+                                                         Trade.kind.in_(("buy", "sell")))))
+    try:
+        # Mint facts (supply, authorities, pump.fun origin) settle entry market caps during pricing.
+        report["mints"] = refresh_mints(session, rpc, mints)
+    except ProviderError as exc:
+        session.rollback()
+        report["mints"] = {"error": exc.message}
     try:
         report["pricing"] = price_trades(session, wallet.address, prices)
     except ProviderError as exc:

@@ -372,7 +372,7 @@ def _chain_fills(session, wallet: str) -> tuple[list[Fill], set[tuple[str, str]]
                           timestamp=datetime.fromtimestamp(t.block_time, timezone.utc), kind=t.kind,
                           quantity=Decimal(d["token_amount"]), gross_usd=money("gross_usd"),
                           fees_usd=money("fees_usd"), market_cap_usd=money("market_cap_usd") if t.kind == "buy" else None,
-                          source_url=f"https://solscan.io/tx/{t.signature}",
+                          source_url=f"https://solscan.io/tx/{t.signature}", slot=t.slot,
                           evidence={"source": "chain", "movement": "chain", "trade": evidence["trade"],
                                     "usd": evidence.get("usd", "unknown"),
                                     "market_cap": evidence.get("market_cap", "unknown"),
@@ -398,11 +398,10 @@ def default_as_of(session, wallet: str) -> datetime:
     return datetime.now(timezone.utc).replace(microsecond=0)
 
 
-def wallet_analysis(session, wallet: Wallet, filters: Filters, as_of: datetime | None = None):
-    as_of = as_of or default_as_of(session, wallet.address)
-    fills, covered = _chain_fills(session, wallet.address)
-    records = session.scalars(select(EventRecord).where(EventRecord.wallet == wallet.address))
-    for row in records:
+def wallet_fills(session, wallet: str) -> list[Fill]:
+    """Chain-derived fills plus imported ledger events not already covered by the chain."""
+    fills, covered = _chain_fills(session, wallet)
+    for row in session.scalars(select(EventRecord).where(EventRecord.wallet == wallet)):
         if (row.signature, row.token) in covered:
             continue  # the chain-derived event for the same signature and mint takes precedence
         p = row.payload
@@ -411,6 +410,12 @@ def wallet_analysis(session, wallet: Wallet, filters: Filters, as_of: datetime |
                           quantity=Decimal(p["quantity"]), source_url=p["source_url"], evidence=row.evidence,
                           **{k: Decimal(p[k]) if p.get(k) is not None else None for k in
                              ("gross_usd", "fees_usd", "market_cap_usd")}))
+    return fills
+
+
+def wallet_analysis(session, wallet: Wallet, filters: Filters, as_of: datetime | None = None):
+    as_of = as_of or default_as_of(session, wallet.address)
+    fills = wallet_fills(session, wallet.address)
     complete = history_complete(session.get(SyncState, wallet.address), as_of, filters.analysis_days)
     result = analyze(wallet.address, fills, filters, as_of, history_complete=complete)
     if not session.get(AnalysisSnapshot, result["snapshot_id"]):
@@ -436,7 +441,7 @@ def _sol_fill(t: Trade) -> Fill:
     return Fill(signature=t.signature, event_index=t.event_index, token=t.mint,
                 timestamp=datetime.fromtimestamp(t.block_time, timezone.utc), kind=t.kind,
                 quantity=Decimal(d["token_amount"]), gross_usd=sol, fees_usd=Decimal(d["network_fee_sol"]),
-                market_cap_usd=None, source_url=f"https://solscan.io/tx/{t.signature}",
+                market_cap_usd=None, source_url=f"https://solscan.io/tx/{t.signature}", slot=t.slot,
                 evidence={**d["evidence"], "quote_asset": d["quote_asset"], "issues": d["issues"]})
 
 

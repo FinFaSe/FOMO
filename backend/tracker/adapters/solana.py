@@ -76,6 +76,19 @@ class SolanaRPC:
             opts["until"] = until
         return self.call("getSignaturesForAddress", [wallet, opts])
 
+    def accounts(self, addresses: list[str], *, encoding: str = "jsonParsed", data_slice: dict | None = None):
+        """getMultipleAccounts (max 100). Returns one value per address: the account dict or None."""
+        if len(addresses) > 100:
+            raise ValueError("getMultipleAccounts admite como máximo 100 direcciones")
+        opts = {"commitment": "finalized", "encoding": encoding}
+        if data_slice is not None:
+            opts["dataSlice"] = data_slice
+        result = self.call("getMultipleAccounts", [addresses, opts])
+        values = result.get("value") if isinstance(result, dict) else None
+        if not isinstance(values, list) or len(values) != len(addresses):
+            raise ProviderError("Respuesta getMultipleAccounts inválida")
+        return values
+
     def transaction(self, signature: str):
         result = self.call("getTransaction", [signature, {"commitment": "finalized", "encoding": "jsonParsed",
                                                          "maxSupportedTransactionVersion": 1}])

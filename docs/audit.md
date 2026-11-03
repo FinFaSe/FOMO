@@ -15,7 +15,7 @@ Herramientas disponibles: Python 3.12, Node 24, uv, npm, Chromium y Docker.
 | [FOMO API términos](https://fomoapi.io/terms) | Datos as-is; identidades inferidas; respetar límites; prohíbe redistribución de dataset bruto y mirroring masivo | Uso interno, resolución puntual, sin republicar respuestas brutas |
 | [Coinbase Exchange candles](https://docs.cdp.coinbase.com/api-reference/exchange-api/rest-api/products/get-product-candles) | Público, sin clave; velas de 60 s, máx. ~300 por petición, minutos sin operaciones ausentes | SOL/USD histórico por minuto para valorar operaciones (añadido en noviembre de 2026; no probado desde este entorno por política de red) |
 | [Pyth Benchmarks](https://docs.pyth.network/benchmarks) | El endpoint público `/v1/shims/tradingview` se retiró el 26/08/2026; la History API nueva requiere clave | No usado |
-| [DEX Screener API](https://docs.dexscreener.com/api/reference) | Describe snapshots de pares y perfiles, límites 60/300 solicitudes por minuto según método | Investigado, no integrado; un precio o market cap actual no demuestra la entrada histórica |
+| [DEX Screener API](https://docs.dexscreener.com/api/reference) | Describe snapshots de pares y perfiles, límites 60/300 solicitudes por minuto según método | Integrado en noviembre de 2026 solo para valorar posiciones abiertas (`/tokens/v1/solana/…`, hasta 30 mints); un precio o market cap actual no demuestra la entrada histórica |
 
 `fomoapi.io` documenta que `/positions` sucede a `/trades`, que el historial de posiciones es incompleto
 en todas sus configuraciones y que su PnL reportado no garantiza la separación realized/unrealized/fees.

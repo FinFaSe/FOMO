@@ -42,6 +42,7 @@ class SyntheticRPC:
         self.payloads = {}
         self.history = [{"signature": SIG, "blockTime": int(AS_OF.timestamp()), "err": None}]
         self.fetches = []
+        self.account_data, self.account_calls = {}, []
 
     def signatures(self, wallet, before=None, until=None, limit=10):
         items = list(self.history)
@@ -52,6 +53,11 @@ class SyntheticRPC:
             names = [i["signature"] for i in items]
             items = items[:names.index(until)] if until in names else items
         return copy.deepcopy(items[:limit])
+
+    def accounts(self, addresses, *, encoding="jsonParsed", data_slice=None):
+        """SYNTHETIC getMultipleAccounts: unknown addresses return None."""
+        self.account_calls.append((tuple(addresses), encoding))
+        return [copy.deepcopy(self.account_data.get(a)) for a in addresses]
 
     def transaction(self, signature):
         self.fetches.append(signature)
@@ -90,10 +96,23 @@ class SyntheticPrices:
                 for m in range(start - start % 60, end, 60) if m >= start and m not in self.gaps]
 
 
+class SyntheticQuotes:
+    """SYNTHETIC current quotes: {mint: {...}} set by each test; unknown mints are not found."""
+
+    source = "https://synthetic-quotes.example.org"
+
+    def __init__(self):
+        self.data, self.calls = {}, []
+
+    def quotes(self, mints):
+        self.calls.append(list(mints))
+        return {m: dict(self.data[m]) for m in mints if m in self.data}
+
+
 @pytest.fixture
 def client(tmp_path):
     rpc = SyntheticRPC()
-    app = create_app(f"sqlite:///{tmp_path}/test.db", rpc=rpc, prices=SyntheticPrices())
+    app = create_app(f"sqlite:///{tmp_path}/test.db", rpc=rpc, prices=SyntheticPrices(), quotes=SyntheticQuotes())
     with TestClient(app) as c:
         c.post("/api/wallets", json={"address": WALLET, "label": "SYNTHETIC TEST"})
         yield c, rpc
@@ -247,7 +266,8 @@ def test_fomo_key_stays_server_side_and_upstream_report_is_not_proof(tmp_path, m
         return httpx.Response(200, json={"wallets": {"solana": WALLET}, "pnlUsd": 999999})
 
     fomo = FomoAPI(httpx.Client(transport=httpx.MockTransport(transport)))
-    app = create_app(f"sqlite:///{tmp_path}/fomo.db", rpc=SyntheticRPC(), fomo=fomo, prices=SyntheticPrices())
+    app = create_app(f"sqlite:///{tmp_path}/fomo.db", rpc=SyntheticRPC(), fomo=fomo, prices=SyntheticPrices(),
+                     quotes=SyntheticQuotes())
     with TestClient(app) as c:
         w = c.post("/api/integrations/fomo/resolve", json={"handle": "@test_user"}).json()
         assert w["identity"]["verification"] == "provider_reported_not_independently_verified"

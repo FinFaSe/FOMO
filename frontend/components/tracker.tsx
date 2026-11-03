@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import type { Analysis, ChainPositions, ChainTrade, Config, Filters, Job, Observation, Wallet, WorkerStatus } from "./types";
+import type { Analysis, ChainPositions, ChainTrade, Config, Filters, Job, Observation, OpenPositions, Wallet, WorkerStatus } from "./types";
 
 const initial: Filters = { max_entry_market_cap_usd: "250000", min_realized_roi_pct: "500",
   min_win_rate: 0.6, min_evaluable_positions: 30, analysis_days: 90, conservative_win_rate: true };
@@ -11,6 +11,9 @@ const money = (s: string | number | null | undefined) => s == null ? "Sin datos"
 const sol = (s: string | null | undefined) => s == null ? "Sin datos" : `${Number(s).toLocaleString("es-PE", { maximumFractionDigits: 4 })} SOL`;
 const roi = (s: string | null | undefined) => s == null ? "Desconocido" : `${Number(s).toFixed(1)}%`;
 const ACTIVE_JOB = ["queued", "running", "cancel_requested"];
+const riskNames: Record<string, string> = { freeze_authority_active: "Puede congelar cuentas", mint_authority_active: "Puede emitir más tokens",
+  token2022_restrictive_extension: "Extensión Token-2022 restrictiva", low_liquidity: "Liquidez < USD 10.000" };
+const ago = (s: string | null) => { if (!s) return "—"; const m = Math.round((Date.now() - new Date(s).getTime()) / 60000); return m < 1 ? "ahora" : m < 60 ? `hace ${m} min` : `hace ${Math.round(m / 60)} h`; };
 const jobStates: Record<string, string> = { queued: "En cola", running: "Sincronizando", cancel_requested: "Cancelando…",
   done: "Completado", failed: "Falló", cancelled: "Cancelado" };
 const kinds: Record<string, string> = { buy: "Compra", sell: "Venta", transfer_in: "Entrada", transfer_out: "Salida" };
@@ -81,6 +84,7 @@ export default function Tracker() {
   const [chain, setChain] = useState<ChainPositions | null>(null);
   const [trades, setTrades] = useState<ChainTrade[]>([]);
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [openPositions, setOpenPositions] = useState<OpenPositions | null>(null);
   const [worker, setWorker] = useState<WorkerStatus | null>(null);
   const [jobsVersion, setJobsVersion] = useState(0);
   const [verifyOffset, setVerifyOffset] = useState(0);
@@ -112,8 +116,10 @@ export default function Tracker() {
 
   useEffect(() => {
     let active = true;
-    setAnalysis(null); setObservations([]); setObservationTotal(0); setChain(null); setTrades([]);
+    setAnalysis(null); setObservations([]); setObservationTotal(0); setChain(null); setTrades([]); setOpenPositions(null);
     if (selected) {
+      // Current quotes come from an external source: their failure must not hide the rest of the profile.
+      api<OpenPositions>(`/wallets/${selected}/open-positions`).then(op => { if (active) setOpenPositions(op); }).catch(() => {});
       Promise.all([api<Analysis>(`/wallets/${selected}/analysis?${query(filters)}`),
         api<{ items: Observation[]; total: number }>(`/wallets/${selected}/observations?limit=20&offset=${observationOffset}`),
         api<ChainPositions>(`/wallets/${selected}/chain-positions?days=${filters.analysis_days}`),
@@ -322,8 +328,29 @@ export default function Tracker() {
             {observationTotal > 20 && <div className="pagination"><button className="quiet" disabled={!observationOffset} onClick={() => setObservationOffset(Math.max(0,observationOffset-20))}>← Anteriores</button>
               <span>{observationOffset+1}–{Math.min(observationOffset+20,observationTotal)} de {observationTotal}</span><button className="quiet" disabled={observationOffset+20 >= observationTotal} onClick={() => setObservationOffset(observationOffset+20)}>Siguientes →</button></div>}
           </section>}
+          {wallet && openPositions && openPositions.positions.length > 0 && <section className="panel transactions"><div className="section-heading"><h2>Posiciones abiertas</h2>
+              <span className="micro">PRECIO ACTUAL · {openPositions.quote_source?.replace("https://", "").toUpperCase()}</span></div>
+            <p className="muted">Valoradas al precio de mercado actual (no es precio de ejecución: vender en un pool con poca liquidez movería el precio). No forman parte de los snapshots ni del ranking.</p>
+            {openPositions.issues.length > 0 && <p className="risk">Cotizaciones no actualizadas: {openPositions.issues.join("; ")}. Se muestran las últimas guardadas.</p>}
+            <div className="profile-metrics">{[
+              ["Valor actual", money(openPositions.totals.value_usd)],
+              ["Costo", money(openPositions.totals.cost_basis_usd)],
+              ["PnL no realizado", money(openPositions.totals.unrealized_pnl_usd)],
+              ["Posiciones valoradas", `${openPositions.totals.valued_positions} / ${openPositions.totals.open_positions}`],
+            ].map(([k,v]) => <div key={k}><span>{k}</span><strong>{v}</strong></div>)}</div>
+            <div className="table-wrap"><table><thead><tr><th>Token</th><th>Cantidad</th><th>Costo</th><th>Precio</th><th>Valor</th><th>PnL no realizado</th><th>Liquidez</th><th>Riesgos</th><th>Cotización</th></tr></thead><tbody>{openPositions.positions.map(p => <tr key={`${p.token}-${p.cycle}`}>
+              <td><a href={`https://solscan.io/token/${p.token}`} target="_blank" rel="noreferrer"><code>{p.symbol || short(p.token)} ↗</code></a></td>
+              <td className="mono">{Number(p.quantity).toLocaleString("es-PE", { maximumFractionDigits: 2 })}</td>
+              <td className="mono">{money(p.cost_basis_usd)}</td>
+              <td className="mono">{p.price_usd == null ? "Sin cotización" : `$${Number(p.price_usd).toPrecision(4)}`}</td>
+              <td className="mono">{money(p.value_usd)}</td>
+              <td className="mono">{p.unrealized_pnl_usd == null ? "—" : `${money(p.unrealized_pnl_usd)} (${Number(p.unrealized_pct).toFixed(1)}%)`}</td>
+              <td className="mono">{money(p.liquidity_usd)}</td>
+              <td>{p.risks.length ? <small className="risk">{p.risks.map(r => riskNames[r] || r).join(" · ")}</small> : <small>—</small>}</td>
+              <td><small>{p.quote_found ? `${p.dex_id ?? ""} · ${ago(p.quote_fetched_at)}` : "—"}</small></td></tr>)}</tbody></table></div>
+          </section>}
           {wallet && chain && <section className="panel transactions"><div className="section-heading"><h2>Operaciones on-chain</h2><span className="micro">EN SOL · EXPLORATORIO</span></div>
-            <p className="muted">Compras y ventas detectadas en las transacciones guardadas (Pump.fun, PumpSwap, Raydium, Jupiter). «Verificada» exige un programa reconocido y la firma de la wallet. Valoradas en USD con SOL/USD de Coinbase; market cap verificado solo para mints de pump.fun. El ranking usa la versión en USD de estas posiciones.</p>
+            <p className="muted">Compras y ventas detectadas en las transacciones guardadas (Pump.fun, PumpSwap, Raydium, Jupiter). «Verificada» exige un programa reconocido y la firma de la wallet. Valoradas en USD con SOL/USD de Coinbase. Market cap verificado para mints de pump.fun (también tras graduarse); «≈» es una estimación con el suministro actual, que el ranking no acepta. El ranking usa la versión en USD de estas posiciones.</p>
             <div className="profile-metrics">{[
               ["PnL realizado (SOL)", sol(chain.summary.net_realized_pnl_sol)],
               ["Win rate por posición", pct(chain.summary.win_rate)],
@@ -349,7 +376,7 @@ export default function Tracker() {
                 <td className="mono">{Number(t.token_amount).toLocaleString("es-PE")}</td>
                 <td className="mono">{t.quote_amount == null ? "—" : `${Number(t.quote_amount).toLocaleString("es-PE", { maximumFractionDigits: 6 })} ${t.quote_asset}`}</td>
                 <td className="mono">{t.usd?.gross_usd == null ? "—" : money(t.usd.gross_usd)}</td>
-                <td className="mono">{t.usd?.market_cap_usd == null ? "—" : money(t.usd.market_cap_usd)}</td>
+                <td className="mono" title={t.usd?.market_cap_method ?? undefined}>{t.usd?.market_cap_usd == null ? "—" : `${t.evidence.market_cap === "estimated" ? "≈ " : ""}${money(t.usd.market_cap_usd)}`}</td>
                 <td>{t.venues.join(", ") || "—"}</td><td><span className="micro">{t.evidence.trade} · usd {t.evidence.usd} · cap {t.evidence.market_cap}</span></td></tr>)}</tbody></table></div></>}
           </section>}
           {analysis && <section className="panel transactions"><div className="section-heading"><h2>Posiciones reconstruidas</h2><span className="micro">COSTO PROMEDIO PONDERADO</span></div>
@@ -371,7 +398,8 @@ export default function Tracker() {
         </section>}
 
         {tab === "sources" && <div className="sources-grid"><section className="panel"><div className="section-heading"><h2>Fuentes disponibles</h2><span className="badge">SIN SCRAPING PRIVADO</span></div>
-          <article className="source-card"><span className="source-icon">◎</span><div><h3>Solana JSON-RPC</h3><span className="badge green">Público · sin clave</span><p>Firmas, transacciones finalizadas, fees de red y balances de tokens. No proporciona por sí solo precios históricos USD, market cap de entrada ni un historial de swaps normalizado.</p><a href="https://solana.com/docs/rpc/http/gettransaction" target="_blank" rel="noreferrer">Documentación oficial ↗</a></div></article>
+          <article className="source-card"><span className="source-icon">◎</span><div><h3>Solana JSON-RPC</h3><span className="badge green">Público · sin clave</span><p>Firmas, transacciones finalizadas, fees de red, balances de tokens y datos de cada mint (suministro, autoridades, cuenta de bonding curve de pump.fun). No proporciona por sí solo precios históricos USD, market cap de entrada ni un historial de swaps normalizado.</p><a href="https://solana.com/docs/rpc/http/gettransaction" target="_blank" rel="noreferrer">Documentación oficial ↗</a></div></article>
+          <article className="source-card"><span className="source-icon">≋</span><div><h3>DEX Screener · cotizaciones actuales</h3><span className="badge green">Público · sin clave</span><p>Precio y liquidez actuales del par más profundo de cada token, solo para valorar posiciones abiertas (caché de 1 minuto). Un precio actual nunca sustituye al precio o al market cap de entrada.</p><a href="https://docs.dexscreener.com/api/reference" target="_blank" rel="noreferrer">Documentación ↗</a></div></article>
           <article className="source-card"><span className="source-icon">$</span><div><h3>Coinbase Exchange · velas SOL-USD</h3><span className="badge green">Público · sin clave</span><p>Precio SOL/USD por vela de 1 minuto en el momento de cada operación (cierre de la vela; se guarda su rango). USDC y USDT a la par. Las velas se guardan en caché y la reconstrucción no vuelve a pedirlas.</p><a href="https://docs.cdp.coinbase.com/api-reference/exchange-api/rest-api/products/get-product-candles" target="_blank" rel="noreferrer">Documentación ↗</a></div></article>
           <article className="source-card"><span className="source-icon">f.</span><div><h3>FOMO API · proveedor independiente</h3><span className="badge warning">{config?.fomo_api_configured ? "Clave configurada" : "Requiere FOMO_API_KEY"}</span><p>Permite resolver usuarios a wallets. Su asociación es declarada y su historial de posiciones es incompleto. No implica integración oficial con fomo.family.</p><a href="https://fomoapi.io/docs" target="_blank" rel="noreferrer">Documentación ↗</a><span> · </span><a href="https://fomoapi.io/terms" target="_blank" rel="noreferrer">Condiciones ↗</a>
             <form className="inline-form" onSubmit={e => {e.preventDefault(); action("resolve", async () => {const w = await api<Wallet>("/integrations/fomo/resolve",post({handle})); await reloadWallets(); setSelected(w.address); setTab("overview"); setNotice("Asociación de identidad declarada por el proveedor, pendiente de verificación independiente."); });}}>
@@ -384,7 +412,7 @@ export default function Tracker() {
           <li><strong>Confianza según muestra</strong><p>Wilson al 95% sobre resultados agregados por token. Recomprar el mismo mint no crea nuevas observaciones independientes. Puede persistir correlación entre tokens.</p></li>
           <li><strong>Datos desconocidos, visibles</strong><p>Importar una URL o una firma no valida precios ni costos. Una coincidencia de balance solo verifica el movimiento. Transfers y costos faltantes impiden evaluar la posición.</p></li>
           <li><strong>Score separado del riesgo de copia</strong><p>Pesos 25/20/15/15/10/10/5. Sin backtest prospectivo, replicabilidad aporta cero. El score exploratorio nunca se presenta como validado.</p></li></ol>
-          <div className="evidence-box"><strong>Alcance de esta fase</strong><p>Ingesta incremental, swaps normalizados, valoración USD por vela de 1 minuto, market cap verificado para mints de pump.fun, análisis, snapshots, candidatos y watchlist. Market cap de otros mints, alertas continuas, convergencia y backtesting quedan para las siguientes fases.</p></div>
+          <div className="evidence-box"><strong>Alcance de esta fase</strong><p>Ingesta incremental, swaps normalizados, valoración USD por vela de 1 minuto, market cap verificado para mints de pump.fun (estimado para el resto sin autoridad de emisión), posiciones abiertas a precio actual, sincronización en segundo plano, análisis, snapshots, candidatos y watchlist. Alertas en tiempo real, convergencia y backtesting quedan para las siguientes fases.</p></div>
         </section></div>}
         <footer><span>FOMO SMART MONEY RESEARCH <span className="slash">/</span> Datos con procedencia, resultados con límites.</span><span>Horario: Lima · UTC−5</span></footer>
       </div>

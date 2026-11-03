@@ -13,6 +13,7 @@ from sqlalchemy import func, select
 
 from .adapters.fomo import FomoAPI
 from .adapters.prices import CoinbaseCandles
+from .adapters.quotes import DexScreenerQuotes
 from .adapters.solana import ProviderError, SolanaRPC, digest, observe
 from .db import (
     AnalysisSnapshot,
@@ -20,12 +21,15 @@ from .db import (
     Observation,
     RawTransaction,
     SourceCapture,
+    TokenMint,
+    TokenQuote,
     Trade,
     Wallet,
     database,
     now_iso,
 )
 from .jobs import Worker, cancel, enqueue, ensure_idle, job_json, run_inline, worker_status
+from .portfolio import open_positions
 from .pricing import price_trades
 from .schemas import (
     DiscoveryRequest,
@@ -39,10 +43,10 @@ from .schemas import (
     address,
     utc,
 )
-from .service import chain_positions, import_ledger, renormalize, verify_ledger, wallet_analysis
+from .service import chain_positions, import_ledger, renormalize, verify_ledger, wallet_analysis, wallet_fills
 
 
-def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None) -> FastAPI:
+def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None, quotes=None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app):
         # Optional single-process mode for local use; production runs `python -m tracker.worker`.
@@ -60,7 +64,8 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None) -> F
     rpc = rpc or SolanaRPC()
     fomo = fomo or FomoAPI()
     prices = prices or CoinbaseCandles()
-    app.state.prices = prices
+    quotes = quotes or DexScreenerQuotes()
+    app.state.prices, app.state.quotes = prices, quotes
     write_lock = threading.Lock()
     allowed_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
     app.add_middleware(CORSMiddleware, allow_origins=allowed_origins,
@@ -260,6 +265,27 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None) -> F
             raise HTTPException(422, str(exc)) from None
         get_wallet(s, wallet)
         return chain_positions(s, wallet, timestamp, days)
+
+    @app.get("/api/wallets/{wallet}/open-positions")
+    def wallet_open_positions(wallet: str, refresh: bool = True, s=Depends(session)):
+        get_wallet(s, wallet)
+        return open_positions(s, wallet, wallet_fills(s, wallet), quotes, refresh=refresh)
+
+    @app.get("/api/tokens/{mint}")
+    def token(mint: str, s=Depends(session)):
+        try:
+            address(mint)
+        except ValueError:
+            raise HTTPException(422, "Mint Solana inválido") from None
+        facts, quote = s.get(TokenMint, mint), s.get(TokenQuote, mint)
+        if facts is None and quote is None:
+            raise HTTPException(404, "Token sin datos almacenados")
+        fields = ("exists", "program", "decimals", "supply_raw", "mint_authority", "freeze_authority",
+                  "extensions", "pump_bonding_curve", "pump_origin", "source", "fetched_at")
+        quote_fields = ("found", "price_usd", "liquidity_usd", "market_cap_usd", "fdv_usd", "pair_address",
+                        "dex_id", "symbol", "source", "fetched_at")
+        return {"mint": mint, "facts": {k: getattr(facts, k) for k in fields} if facts else None,
+                "quote": {k: getattr(quote, k) for k in quote_fields} if quote else None}
 
     @app.get("/api/wallets/{wallet}/analysis")
     def analysis(wallet: str, filters: Annotated[Filters, Depends()], as_of: datetime | None = None,
