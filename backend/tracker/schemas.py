@@ -160,3 +160,28 @@ class DiscoveryRequest(StrictModel):
 
 class FomoResolve(StrictModel):
     handle: str = Field(pattern=r"^@?[a-zA-Z0-9_.-]{1,64}$")
+
+
+class AlertsRead(StrictModel):
+    ids: list[int] = Field(default_factory=list, max_length=500)
+    all: bool = False
+
+
+def hook_signatures(payload, limit: int = 100) -> list[str]:
+    """Signatures from a provider webhook body: [{"signature": …}], {"signatures": […]}, Helius-style transaction
+    objects ({"transaction": {"signatures": […]}}) or plain strings. Invalid entries are ignored."""
+    items = payload.get("signatures", [payload]) if isinstance(payload, dict) else payload
+    found = []
+    for item in items if isinstance(items, list) else []:
+        candidate = item
+        if isinstance(item, dict):
+            candidate = item.get("signature") or ((item.get("transaction") or {}).get("signatures") or [None])[0]
+        if not isinstance(candidate, str):
+            continue
+        try:
+            validate_signature(candidate)
+        except ValueError:
+            continue
+        if candidate not in found:
+            found.append(candidate)
+    return found[:limit]

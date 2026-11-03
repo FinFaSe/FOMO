@@ -58,6 +58,8 @@ class SyncState(Base):
     normalizer: Mapped[str | None] = mapped_column(String(40), nullable=True)
     # Every finalized signature with block_time in [covered_from, caught_up_at] is stored.
     caught_up_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # Newest signature handled by the real-time watcher (it never moves head/tail; the sync does).
+    watch_head: Mapped[str | None] = mapped_column(String(88), nullable=True)
     updated_at: Mapped[str] = mapped_column(String(40), default=now_iso)
 
 
@@ -260,6 +262,45 @@ class WalletFunding(Base):
     heartbeat_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
     created_at: Mapped[str] = mapped_column(String(40), default=now_iso)
     fetched_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
+class Alert(Base):
+    """A watchlist event: buy, sell or convergence. `key` makes generation idempotent."""
+
+    __tablename__ = "alerts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    key: Mapped[str] = mapped_column(String(200), unique=True)
+    kind: Mapped[str] = mapped_column(String(20), index=True)  # buy | sell | convergence
+    wallet: Mapped[str | None] = mapped_column(String(44), nullable=True, index=True)
+    mint: Mapped[str] = mapped_column(String(44), index=True)
+    signature: Mapped[str | None] = mapped_column(String(88), nullable=True)
+    event_time: Mapped[int | None] = mapped_column(Integer, nullable=True)  # block time of the trade
+    detected_at: Mapped[str | None] = mapped_column(String(40), nullable=True)  # transaction downloaded
+    created_at: Mapped[str] = mapped_column(String(40), default=now_iso, index=True)
+    details: Mapped[dict] = mapped_column(JSON)
+    # Outbound webhook: pending | sent | failed | off (no webhook configured when the alert was created)
+    delivery_state: Mapped[str] = mapped_column(String(20), index=True, default="pending")
+    delivery_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    delivery_error: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    delivered_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    read: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class AlertState(Base):
+    __tablename__ = "alert_state"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    last_trade_id: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class PendingSignature(Base):
+    """A pushed signature not yet available at `finalized`; the watcher retries it."""
+
+    __tablename__ = "pending_signatures"
+    signature: Mapped[str] = mapped_column(String(88), primary_key=True)
+    source: Mapped[str] = mapped_column(String(40))
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=now_iso)
 
 
 class AnalysisSnapshot(Base):

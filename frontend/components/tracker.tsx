@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import type { Analysis, Candidate, ChainPositions, ChainTrade, Config, Filters, Job, Observation, OpenPositions, Seed, Wallet, WalletLinks, WorkerStatus } from "./types";
+import type { AlertItem, AlertList, Analysis, Candidate, ChainPositions, ChainTrade, Config, Filters, Job, Observation, OpenPositions, Seed, Wallet, WalletLinks, WorkerStatus } from "./types";
 
 const initial: Filters = { max_entry_market_cap_usd: "250000", min_realized_roi_pct: "500",
   min_win_rate: 0.6, min_evaluable_positions: 30, analysis_days: 90, conservative_win_rate: true };
@@ -13,6 +13,12 @@ const roi = (s: string | null | undefined) => s == null ? "Desconocido" : `${Num
 const ACTIVE_JOB = ["queued", "running", "cancel_requested"];
 const riskNames: Record<string, string> = { freeze_authority_active: "Puede congelar cuentas", mint_authority_active: "Puede emitir más tokens",
   token2022_restrictive_extension: "Extensión Token-2022 restrictiva", low_liquidity: "Liquidez < USD 10.000" };
+const alertNames: Record<string, string> = { buy: "Compra", sell: "Venta", convergence: "Convergencia" };
+const alertToken = (a: AlertItem) => a.details.symbol || short(a.mint);
+const alertTitle = (a: AlertItem) => a.kind === "convergence" ? `Convergencia en ${alertToken(a)}` : `${alertNames[a.kind]}: ${a.details.label || short(a.wallet || "")}`;
+const alertBody = (a: AlertItem) => a.kind === "convergence"
+  ? `${a.details.entities} grupos de tu watchlist compraron ${alertToken(a)} en ${a.details.window_minutes} min`
+  : `${alertToken(a)} · ${a.details.usd ? money(a.details.usd) : `${a.details.quote_amount ?? "?"} ${a.details.quote_asset ?? ""}`}${a.details.market_cap_usd ? ` · MC ${a.details.market_cap_status === "estimated" ? "≈" : ""}${money(a.details.market_cap_usd)}` : ""}`;
 const ago = (s: string | null) => { if (!s) return "—"; const m = Math.round((Date.now() - new Date(s).getTime()) / 60000); return m < 1 ? "ahora" : m < 60 ? `hace ${m} min` : `hace ${Math.round(m / 60)} h`; };
 const jobStates: Record<string, string> = { queued: "En cola", running: "Sincronizando", cancel_requested: "Cancelando…",
   done: "Completado", failed: "Falló", cancelled: "Cancelado" };
@@ -98,6 +104,10 @@ export default function Tracker() {
   const [verifyOffset, setVerifyOffset] = useState(0);
   const [rankings, setRankings] = useState<{ address: string; label: string; metrics: Analysis["metrics"]; entity: { size: number } | null }[]>([]);
   const [links, setLinks] = useState<WalletLinks | null>(null);
+  const [alertList, setAlertList] = useState<AlertList | null>(null);
+  const [unread, setUnread] = useState(0);
+  const [alertKind, setAlertKind] = useState("");
+  const [desktopAlerts, setDesktopAlerts] = useState(false);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -221,6 +231,52 @@ export default function Tracker() {
     });
   }
 
+  // Desktop notifications are a per-browser convenience: remembered in localStorage (which may be unavailable).
+  useEffect(() => {
+    try { setDesktopAlerts(localStorage.getItem("fomo-desktop-alerts") === "1" && typeof Notification !== "undefined" && Notification.permission === "granted"); } catch { /* storage blocked */ }
+  }, []);
+  async function toggleDesktopAlerts() {
+    if (desktopAlerts) { setDesktopAlerts(false); try { localStorage.setItem("fomo-desktop-alerts", "0"); } catch { /* ignore */ } return; }
+    if (typeof Notification === "undefined") { setError("Este navegador no admite notificaciones."); return; }
+    const permission = await Notification.requestPermission();
+    const on = permission === "granted";
+    setDesktopAlerts(on);
+    try { localStorage.setItem("fomo-desktop-alerts", on ? "1" : "0"); } catch { /* ignore */ }
+    if (!on) setNotice("El navegador no concedió permiso para notificaciones.");
+  }
+
+  // Alerts: unread badge everywhere (and desktop notifications for new ones); full list on the Alerts tab.
+  useEffect(() => {
+    let active = true; let lastId = -1; let timer: ReturnType<typeof setTimeout> | undefined;
+    async function load() {
+      try {
+        const q = new URLSearchParams({ limit: tab === "alerts" ? "100" : "20" });
+        if (tab === "alerts" && alertKind) q.set("kind", alertKind);
+        const r = await api<AlertList>(`/alerts?${q}`);
+        if (!active) return;
+        setUnread(r.unread);
+        if (tab === "alerts") setAlertList(r);
+        const newest = r.items[0]?.id ?? 0;
+        if (lastId >= 0 && desktopAlerts) {
+          r.items.filter(a => a.id > lastId && !a.read).reverse().forEach(a => {
+            try { new Notification(alertTitle(a), { body: alertBody(a) }); } catch { /* ignore */ }
+          });
+        }
+        lastId = Math.max(lastId, newest);
+      } catch { /* the badge is best effort */ }
+      if (active) timer = setTimeout(load, tab === "alerts" ? 4000 : 10000);
+    }
+    load();
+    return () => { active = false; if (timer) clearTimeout(timer); };
+  }, [tab, alertKind, desktopAlerts]);
+
+  async function markAllRead() {
+    await action("read", async () => {
+      const r = await api<{ unread: number }>("/alerts/read", post({ all: true }));
+      setUnread(r.unread); setAlertList(l => l ? { ...l, unread: r.unread, items: l.items.map(a => ({ ...a, read: true })) } : l);
+    });
+  }
+
   async function action(name: string, task: () => Promise<void>) {
     setBusy(name); setError(""); setNotice("");
     try { await task(); } catch (e) { setError(e instanceof Error ? e.message : "Error inesperado"); }
@@ -261,7 +317,7 @@ export default function Tracker() {
     });
   }
   const tabs = [{id: "overview", name: "Explorador", icon: "◈"}, {id: "rankings", name: "Ranking validado", icon: "↗"},
-    {id: "discovery", name: "Descubrimiento", icon: "⌕"}, {id: "watchlist", name: "Watchlist", icon: "☆"},
+    {id: "discovery", name: "Descubrimiento", icon: "⌕"}, {id: "alerts", name: "Alertas", icon: "◉"}, {id: "watchlist", name: "Watchlist", icon: "☆"},
     {id: "sources", name: "Fuentes y método", icon: "◎"}];
 
   return <div className="shell">
@@ -269,7 +325,7 @@ export default function Tracker() {
       <a className="brand" href="/" aria-label="Inicio Smart Money"><span className="brand-mark">f.</span><div>FOMO<span>SMART MONEY RESEARCH</span></div></a>
       <div className="workspace-label">ESPACIO DE INVESTIGACIÓN</div>
       <nav aria-label="Navegación principal">{tabs.map(t => <button key={t.id} className={tab === t.id ? "nav-item active" : "nav-item"}
-        onClick={() => setTab(t.id)}><span>{t.icon}</span>{t.name}{t.id === "watchlist" && <small>{wallets.filter(w => w.favorite).length}</small>}</button>)}</nav>
+        onClick={() => setTab(t.id)}><span>{t.icon}</span>{t.name}{t.id === "watchlist" && <small>{wallets.filter(w => w.favorite).length}</small>}{t.id === "alerts" && unread > 0 && <small>{unread}</small>}</button>)}</nav>
       <div className="sidebar-note"><span className="status-dot" /> Solana · mainnet<div>Solo datos reales<br/>Sin ejecución de operaciones</div></div>
       <div className="independent">Herramienta de investigación independiente. Sin afiliación con fomo.family.</div>
     </aside>
@@ -452,6 +508,27 @@ export default function Tracker() {
             })}
           </section>}
         </>}
+
+        {tab === "alerts" && <section className="panel"><div className="section-heading"><h2>Alertas de la watchlist</h2><span className="badge">{unread} SIN LEER</span></div>
+          <p className="muted">Compras y ventas recientes de tus wallets favoritas y convergencias: {alertList?.settings.convergence_min ?? 3} grupos distintos comprando el mismo token en {alertList?.settings.convergence_minutes ?? 60} min (las wallets vinculadas cuentan una vez). Solo alertan operaciones de los últimos {alertList?.settings.max_age_minutes ?? 10} min, para no repetir historial.</p>
+          <p className="sync-note"><span className={worker?.watcher_alive ? "status-dot" : "status-dot muted-dot"} />{worker?.watcher_alive ? `Vigilante activo: revisa ${worker.watchers?.[0]?.info?.watching ?? 0} wallets cada ${worker.watchers?.[0]?.info?.interval_seconds ?? 20} s` : "Vigilante detenido: arranca el worker para alertas en tiempo casi real"} · Webhook saliente: {alertList?.webhook_configured ? "configurado" : "no configurado"}</p>
+          <div className="inline-form">
+            <label>Tipo<select value={alertKind} onChange={e => setAlertKind(e.target.value)}><option value="">Todas</option><option value="buy">Compras</option><option value="sell">Ventas</option><option value="convergence">Convergencias</option></select></label>
+            <button className="secondary" onClick={toggleDesktopAlerts}>{desktopAlerts ? "Desactivar notificaciones del navegador" : "Activar notificaciones del navegador"}</button>
+            <button className="quiet" disabled={!!busy || !unread} onClick={markAllRead}>Marcar todo como leído</button>
+          </div>
+          {!alertList?.items.length ? <div className="small-empty">Sin alertas todavía. Marca wallets con ☆ y mantén el worker en marcha.</div> :
+            <div className="table-wrap"><table><thead><tr><th>Hora · Lima</th><th>Tipo</th><th>Wallet</th><th>Token</th><th>Importe</th><th>Market cap</th><th>Retraso</th><th></th></tr></thead><tbody>{alertList.items.map(a => <tr key={a.id} className={a.read ? "" : "unread"}>
+              <td>{a.event_time ? date(a.event_time) : date(a.created_at)}</td>
+              <td><span className={a.kind === "convergence" ? "badge warning" : "badge"}>{alertNames[a.kind] || a.kind}</span></td>
+              <td>{a.kind === "convergence" ? <small>{a.details.participants?.map(p => p.label || short(p.wallet)).join(", ")}</small>
+                : <button className="quiet" onClick={() => { setSelected(a.wallet || ""); setTab("overview"); }}>{a.details.label || short(a.wallet || "")}</button>}</td>
+              <td><a href={`https://solscan.io/token/${a.mint}`} target="_blank" rel="noreferrer"><code>{alertToken(a)} ↗</code></a></td>
+              <td className="mono">{a.kind === "convergence" ? `${a.details.entities} grupos` : a.details.usd ? money(a.details.usd) : `${a.details.quote_amount ?? "—"} ${a.details.quote_asset ?? ""}`}</td>
+              <td className="mono">{a.details.market_cap_usd ? `${a.details.market_cap_status === "estimated" ? "≈ " : ""}${money(a.details.market_cap_usd)}` : "—"}</td>
+              <td className="mono" title="Segundos entre el bloque y la alerta (detección entre paréntesis)">{a.alert_seconds == null ? "—" : `${Math.round(a.alert_seconds)} s`}{a.detection_seconds != null ? <small> ({Math.round(a.detection_seconds)} s)</small> : null}</td>
+              <td>{a.transaction_url && <a href={a.transaction_url} target="_blank" rel="noreferrer">Transacción ↗</a>}</td></tr>)}</tbody></table></div>}
+        </section>}
 
         {tab === "discovery" && <>
           <section className="panel"><div className="section-heading"><h2>Tokens semilla</h2><span className="badge">{seeds.length} SEMILLAS</span></div>

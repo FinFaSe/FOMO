@@ -19,6 +19,10 @@ services:
       SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
       FOMO_API_KEY: ${FOMO_API_KEY:-}
       TRACKER_ACCESS_TOKEN: ${TRACKER_ACCESS_TOKEN:-}
+      TRACKER_HOOK_SECRET: ${TRACKER_HOOK_SECRET:-}
+      TRACKER_ALERT_WEBHOOK_URL: ${TRACKER_ALERT_WEBHOOK_URL:-}
+      TRACKER_ALERT_WEBHOOK_FORMAT: ${TRACKER_ALERT_WEBHOOK_FORMAT:-json}
+      TRACKER_ALERT_TELEGRAM_CHAT_ID: ${TRACKER_ALERT_TELEGRAM_CHAT_ID:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -36,6 +40,10 @@ services:
       DATABASE_URL: postgresql+psycopg://tracker:${POSTGRES_PASSWORD:?Set a local POSTGRES_PASSWORD}@postgres:5432/tracker
       SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
       TRACKER_REFRESH_MINUTES: ${TRACKER_REFRESH_MINUTES:-30}
+      TRACKER_WATCH_SECONDS: ${TRACKER_WATCH_SECONDS:-20}
+      TRACKER_ALERT_WEBHOOK_URL: ${TRACKER_ALERT_WEBHOOK_URL:-}
+      TRACKER_ALERT_WEBHOOK_FORMAT: ${TRACKER_ALERT_WEBHOOK_FORMAT:-json}
+      TRACKER_ALERT_TELEGRAM_CHAT_ID: ${TRACKER_ALERT_TELEGRAM_CHAT_ID:-}
     depends_on:
       # The API creates the schema on start; run exactly one worker per database.
       backend:

@@ -90,13 +90,19 @@ def _record(session, wallet: Wallet, rpc, signature: str, report: dict, *, refre
     if known:
         report["revalidated"] += 1
         return
-    observation = observe(raw.payload, wallet.address)
-    session.add(Observation(wallet=wallet.address, signature=raw.signature,
-                            details={**observation, "source": raw.source,
-                                     "payload_sha256": raw.digest, "fetched_at": raw.fetched_at}))
+    observation, trades = record_observation(session, wallet.address, raw)
     report["transactions"] += 1
     report["failed_transactions"] += int(observation["status"] == "failed")
-    report["trades"] += store_trades(session, wallet.address, raw)
+    report["trades"] += trades
+
+
+def record_observation(session, wallet: str, raw: RawTransaction) -> tuple[dict, int]:
+    """Add the wallet's observation and normalized trades for a stored transaction (caller commits)."""
+    observation = observe(raw.payload, wallet)
+    session.add(Observation(wallet=wallet, signature=raw.signature,
+                            details={**observation, "source": raw.source,
+                                     "payload_sha256": raw.digest, "fetched_at": raw.fetched_at}))
+    return observation, store_trades(session, wallet, raw)
 
 
 def _missing_block_time(state: SyncState | None, report: dict):

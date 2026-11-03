@@ -127,12 +127,31 @@ La correlación entre tokens aún puede reducir la independencia. Ver [método](
      con él o que está vinculado a él queda marcado y excluido por defecto.
    - **¿Se puede copiar?**: para cada compra temprana se mide cuánto se movió el precio 5/30/60 s después y su
      tamaño frente al SOL de la curva; los candidatos muestran la mediana.
-7. Opcional: importa un ledger JSON documentado. Si la cadena ya aporta el evento de la misma firma y mint,
+7. **Alertas** (pestaña propia): el worker arranca un **vigilante** que cada `TRACKER_WATCH_SECONDS` (20 s)
+   pide, para cada wallet de la watchlist ya sincronizada, solo las firmas posteriores a la última vista; guarda
+   esas transacciones y operaciones sin mover los cursores de la sync (que luego no las descarga otra vez), las
+   valora y genera alertas. Tipos: **compra**, **venta** y **convergencia** (`TRACKER_CONVERGENCE_MIN` = 3 grupos
+   distintos comprando el mismo token en `TRACKER_CONVERGENCE_MINUTES` = 60; las wallets vinculadas cuentan una
+   vez; una alerta nueva por cada nivel alcanzado). Solo alertan operaciones de los últimos
+   `TRACKER_ALERT_MAX_AGE_MINUTES` (10), venga de donde venga la operación. Cada alerta guarda hora del bloque,
+   de detección y de aviso (retraso medido). Como se usa `finalized`, el retraso mínimo es el de finalización
+   (~15 s) más el intervalo del vigilante.
+   - **Webhook entrante** para proveedores que empujan transacciones (Helius, QuickNode…):
+     `POST /api/hooks/transactions` con cabecera `X-Tracker-Hook-Secret: $TRACKER_HOOK_SECRET`; acepta
+     `[{"signature": …}]`, `{"signatures": […]}` u objetos con `transaction.signatures`. Lo no finalizado se
+     reintenta. No usa `TRACKER_ACCESS_TOKEN` (tiene su propio secreto).
+   - **Webhook saliente** opcional: `TRACKER_ALERT_WEBHOOK_URL` (HTTPS) con `TRACKER_ALERT_WEBHOOK_FORMAT` =
+     `json` | `slack` | `discord` | `telegram` (este último con `TRACKER_ALERT_TELEGRAM_CHAT_ID` y la URL
+     `https://api.telegram.org/bot<token>/sendMessage`). Tres intentos por alerta. La URL es un secreto: nunca se
+     muestra ni se registra.
+   - `GET /api/alerts`, `POST /api/alerts/read`; el dashboard muestra el contador, la lista y notificaciones
+     del navegador opcionales.
+8. Opcional: importa un ledger JSON documentado. Si la cadena ya aporta el evento de la misma firma y mint,
    prevalece el de la cadena.
    La importación es una declaración externa, **no** evidencia verificada por sí misma.
-8. **Verificar ledger** comprueba fecha y delta neto del token contra el RPC. No valida
+9. **Verificar ledger** comprueba fecha y delta neto del token contra el RPC. No valida
    automáticamente que fuera un swap ni sus precios históricos USD o capitalización.
-9. Examina métricas exploratorias, exclusiones y snapshot; añade wallets a la watchlist.
+10. Examina métricas exploratorias, exclusiones y snapshot; añade wallets a la watchlist.
 
 Formato del ledger (números decimales como strings; ver modelo `LedgerImport` en OpenAPI):
 
@@ -191,6 +210,11 @@ Variables opcionales:
 | `CORS_ORIGINS` | Orígenes locales permitidos, separados por comas |
 | `TRACKER_REFRESH_MINUTES` | Worker: intervalo de resincronización de la watchlist (30; 0 desactiva) |
 | `TRACKER_EMBEDDED_WORKER` | `1` ejecuta el worker como hilo de la API (solo uso local) |
+| `TRACKER_WATCH_SECONDS` | Vigilante de la watchlist: intervalo en segundos (20; 0 desactiva) |
+| `TRACKER_ALERT_MAX_AGE_MINUTES` | Antigüedad máxima de una operación para alertar (10) |
+| `TRACKER_CONVERGENCE_MIN` / `TRACKER_CONVERGENCE_MINUTES` | Convergencia: grupos distintos (3) y ventana (60) |
+| `TRACKER_HOOK_SECRET` | Activa y protege el webhook entrante `/api/hooks/transactions` |
+| `TRACKER_ALERT_WEBHOOK_URL` / `_FORMAT` / `TRACKER_ALERT_TELEGRAM_CHAT_ID` | Webhook saliente de alertas |
 
 La aplicación está diseñada para desarrollo local de un solo investigador. El proxy web no implementa
 autenticación de usuarios: no exponerlo públicamente sin añadir login, autorización, TLS y límites por usuario.

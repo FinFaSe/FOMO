@@ -78,7 +78,8 @@ export type Job = {
   result: { state?: string; pricing?: { priced?: number; unpriced?: number; error?: string } } | null;
 };
 export type WorkerStatus = {
-  alive: boolean; queued: number; running: number;
+  alive: boolean; queued: number; running: number; watcher_alive?: boolean;
+  watchers?: { id: string; heartbeat_at: string; alive: boolean; info: { interval_seconds?: number; watching?: number } | null }[];
   workers: { id: string; heartbeat_at: string; alive: boolean; info: { refresh_minutes?: number } | null }[];
 };
 export type OpenPosition = {
@@ -113,4 +114,16 @@ export type Funding = {
 export type WalletLinks = {
   funding: Funding | null; funded: Funding[];
   entity: { id: string; size: number; members: string[]; links: { a: string; b: string; reason: string }[] } | null;
+};
+export type AlertItem = {
+  id: number; kind: string; wallet: string | null; mint: string; signature: string | null; event_time: string | null;
+  created_at: string; detection_seconds: number | null; alert_seconds: number | null; transaction_url: string | null;
+  read: boolean; delivery: { state: string; attempts: number; error: string | null };
+  details: { label?: string; symbol?: string | null; usd?: string | null; quote_amount?: string | null; quote_asset?: string | null;
+    market_cap_usd?: string | null; market_cap_status?: string; venues?: string[]; entities?: number; window_minutes?: number;
+    participants?: { wallet: string; label: string; block_time: string; usd: string | null }[] };
+};
+export type AlertList = {
+  items: AlertItem[]; unread: number; webhook_configured: boolean;
+  settings: { max_age_minutes: number; convergence_min: number; convergence_minutes: number };
 };

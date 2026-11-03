@@ -126,6 +126,18 @@ retraso de `finalized`. Sin `as_of` explícito, el análisis y el ranking usan e
   ÷ precio de la compra − 1 (solo dentro de las primeras N operaciones escaneadas); `size_vs_curve` = SOL de la
   compra ÷ SOL de la bonding curve antes de ella.
 
+## Alertas
+
+- Se generan a partir de las operaciones guardadas (vigilante, webhook o sync), recorriendo las nuevas desde un
+  cursor; la clave de cada alerta (tipo, wallet, firma, evento) las hace idempotentes, también tras reconstruir.
+- Solo wallets de la watchlist y operaciones con `blockTime` de hace como máximo 10 min (configurable).
+- Convergencia: compras del mismo mint por wallets de la watchlist en `[t − ventana, t]`, contando grupos (entidades)
+  distintos; se emite al alcanzar el mínimo y cada vez que el número de grupos sube.
+- Tiempos: `event_time` (bloque), `detected_at` (descarga de la transacción) y `created_at` (alerta). El retraso de
+  detección incluye la finalización (`finalized`) y el intervalo de sondeo; quedan guardados para un backtest futuro
+  con un retraso realista. Una alerta no es una recomendación: la wallet puede ser un bot o estar vinculada; esos
+  datos están en su perfil.
+
 ## Muestra y consistencia
 
 El win rate observado es `ciclos con PnL > 0 / ciclos cerrados evaluables`; break-even permanece en el denominador.

@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, select, update
 
 from .adapters.solana import ProviderError
+from .alerts import deliver_pending, generate_alerts
 from .db import Job, Trade, Wallet, WorkerHeartbeat, now_iso
 from .discovery import claim_seed, recover_stale_seeds, scan_seed
 from .entities import claim_funding, enqueue_funding, lookup_funding, recover_stale_funding
@@ -108,6 +109,10 @@ def sync_and_price(session, wallet: Wallet, rpc, prices, request: SyncRequest, o
         # Prices are best effort; trades stay unpriced (and non-evaluable) until a later attempt.
         session.rollback()
         report["pricing"] = {"error": exc.message}
+    wallet.sync = report
+    session.commit()
+    # Watchlist alerts for whatever recent trades this sync stored (delivery happens in the background loops).
+    report["alerts"] = generate_alerts(session)["created"]
     wallet.sync = report
     session.commit()
     return report
@@ -234,12 +239,25 @@ def schedule_refresh(session, every: timedelta, request: JobRequest) -> int:
 
 def worker_status(session) -> dict:
     alive_after = (_now() - WORKER_ALIVE).isoformat()
-    workers = list(session.scalars(select(WorkerHeartbeat).order_by(WorkerHeartbeat.heartbeat_at.desc()).limit(5)))
+    rows = list(session.scalars(select(WorkerHeartbeat).order_by(WorkerHeartbeat.heartbeat_at.desc()).limit(10)))
+    workers = [w for w in rows if not w.id.startswith("watcher:")]
+    watchers = [w for w in rows if w.id.startswith("watcher:")]
     counts = {state: session.scalar(select(func.count()).select_from(Job).where(Job.state == state))
               for state in ("queued", "running")}
+
+    def view(w):
+        return {"id": w.id, "started_at": w.started_at, "heartbeat_at": w.heartbeat_at,
+                "alive": w.heartbeat_at >= alive_after, "info": w.info}
+
+    def watcher_alive(w):
+        # A watcher beats once per polling round; allow two missed rounds before calling it stopped.
+        interval = (w.info or {}).get("interval_seconds", 20)
+        return w.heartbeat_at >= (_now() - timedelta(seconds=max(30, 3 * interval))).isoformat()
+
     return {"alive": any(w.heartbeat_at >= alive_after for w in workers), **counts,
-            "workers": [{"id": w.id, "started_at": w.started_at, "heartbeat_at": w.heartbeat_at,
-                         "alive": w.heartbeat_at >= alive_after, "info": w.info} for w in workers]}
+            "workers": [view(w) for w in workers[:5]],
+            "watcher_alive": any(watcher_alive(w) for w in watchers),
+            "watchers": [view(w) for w in watchers[:5]]}
 
 
 class Worker:
@@ -269,6 +287,7 @@ class Worker:
         Returns what ran (Job, DiscoverySeed or WalletFunding), if anything."""
         with self.sessions() as session:
             self.beat(session)
+            deliver_pending(session)  # outbound alert webhook, if configured
             recover_stale(session)
             if self.refresh and time.monotonic() >= self.next_schedule:
                 schedule_refresh(session, self.refresh, JobRequest())

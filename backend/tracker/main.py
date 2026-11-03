@@ -7,16 +7,20 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from .adapters.fomo import FomoAPI
 from .adapters.prices import CoinbaseCandles
 from .adapters.quotes import DexScreenerQuotes
 from .adapters.solana import ProviderError, SolanaRPC, digest, observe
+from .alerts import KINDS as ALERT_KINDS
+from .alerts import Notifier, alert_json, unread_count
+from .alerts import settings as alert_settings
 from .db import (
+    Alert,
     AnalysisSnapshot,
     DiscoverySeed,
     EarlyBuy,
@@ -38,6 +42,7 @@ from .jobs import Worker, cancel, enqueue, ensure_idle, job_json, run_inline, wo
 from .portfolio import open_positions
 from .pricing import price_trades
 from .schemas import (
+    AlertsRead,
     DiscoveryRequest,
     Filters,
     FomoResolve,
@@ -48,10 +53,12 @@ from .schemas import (
     WalletCreate,
     WalletUpdate,
     address,
+    hook_signatures,
     utc,
 )
 from .service import chain_positions, import_ledger, renormalize, verify_ledger, wallet_analysis, wallet_fills
 from .tokens import PUMP_PROGRAM, pump_bonding_curve
+from .watch import Watcher, push_signatures
 
 
 def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None, quotes=None) -> FastAPI:
@@ -62,6 +69,10 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None, quot
         if os.getenv("TRACKER_EMBEDDED_WORKER") == "1":
             worker = Worker(sessions, rpc, prices, quotes=quotes)
             threading.Thread(target=worker.run_forever, args=(stop,), daemon=True, name="tracker-worker").start()
+            watcher = Watcher(sessions, rpc, prices)
+            if watcher.interval > 0:
+                threading.Thread(target=watcher.run_forever, args=(stop,), daemon=True,
+                                 name="tracker-watcher").start()
         yield
         stop.set()
 
@@ -82,7 +93,9 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None, quot
     @app.middleware("http")
     async def body_and_access_limits(request: Request, call_next):
         token = os.getenv("TRACKER_ACCESS_TOKEN")
-        if token and request.url.path != "/api/health" and request.method != "OPTIONS":
+        # Provider webhooks cannot send the dashboard token; they authenticate with their own secret.
+        exempt = request.url.path == "/api/health" or request.url.path.startswith("/api/hooks/")
+        if token and not exempt and request.method != "OPTIONS":
             actual = request.headers.get("x-tracker-token", "")
             if not hmac.compare_digest(actual, token):
                 return JSONResponse(status_code=401, content={"detail": "Acceso no autorizado"})
@@ -142,6 +155,9 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None, quot
         return {"default_filters": Filters().model_dump(mode="json"), "chain": "solana",
                 "fomo_api_configured": bool(fomo.key), "rpc_source": rpc.source,
                 "price_source": getattr(prices, "source", None),
+                "alerts": {**alert_settings(), "webhook_configured": Notifier().configured,
+                           "watch_seconds": float(os.getenv("TRACKER_WATCH_SECONDS", "20")),
+                           "inbound_hook_configured": bool(os.getenv("TRACKER_HOOK_SECRET"))},
                 "data_mode": "real_only", "ranking_requires": ["complete_normalized_history",
                   "verified_swaps", "verified_historical_usd_and_fees", "verified_historical_market_cap"],
                 "limitations": ["FOMO API es independiente y no oficial; su historial es incompleto.",
@@ -394,6 +410,40 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None, quot
         job, created = enqueue(s, wallet, JobRequest())
         enqueue_funding(s, [wallet], "tracked")
         return {"wallet": wallet_json(row), "job": job_json(job), "created": created}
+
+    @app.get("/api/alerts")
+    def alerts(since_id: int = Query(0, ge=0), kind: str | None = None, unread: bool = False,
+               limit: int = Query(50, ge=1, le=200), s=Depends(session)):
+        query = select(Alert).where(Alert.id > since_id).order_by(Alert.id.desc()).limit(limit)
+        if kind:
+            if kind not in ALERT_KINDS:
+                raise HTTPException(422, "Tipo de alerta inválido")
+            query = query.where(Alert.kind == kind)
+        if unread:
+            query = query.where(Alert.read.is_(False))
+        return {"items": [alert_json(a) for a in s.scalars(query)], "unread": unread_count(s),
+                "settings": alert_settings(), "webhook_configured": Notifier().configured}
+
+    @app.post("/api/alerts/read")
+    def mark_alerts_read(body: AlertsRead, s=Depends(session)):
+        query = update(Alert).where(Alert.read.is_(False))
+        if not body.all:
+            query = query.where(Alert.id.in_(body.ids))
+        changed = s.execute(query.values(read=True)).rowcount
+        s.commit()
+        return {"marked": changed, "unread": unread_count(s)}
+
+    @app.post("/api/hooks/transactions")
+    def hook_transactions(payload: Annotated[list | dict, Body()], request: Request, s=Depends(session)):
+        secret = os.getenv("TRACKER_HOOK_SECRET")
+        if not secret:
+            raise HTTPException(404, "Webhook entrante no configurado (TRACKER_HOOK_SECRET)")
+        if not hmac.compare_digest(request.headers.get("x-tracker-hook-secret", ""), secret):
+            raise HTTPException(401, "Secreto de webhook inválido")
+        signatures = hook_signatures(payload)
+        if not signatures:
+            raise HTTPException(422, "No hay firmas Solana válidas en el cuerpo")
+        return push_signatures(s, rpc, prices, signatures, "webhook")
 
     @app.get("/api/funding/{target}")
     def funding(target: str, s=Depends(session)):
