@@ -1,0 +1,542 @@
+import os
+from datetime import datetime, timezone
+from pathlib import Path
+
+from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    create_engine,
+    event,
+    update,
+)
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+class Base(DeclarativeBase):
+    pass
+
+
+class Wallet(Base):
+    __tablename__ = "wallets"
+    address: Mapped[str] = mapped_column(String(44), primary_key=True)
+    chain: Mapped[str] = mapped_column(String(20), default="solana")
+    label: Mapped[str] = mapped_column(String(80), default="")
+    favorite: Mapped[bool] = mapped_column(Boolean, default=False)
+    identity: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+    sync: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Bumped in the same transaction as any change to the wallet's analysis inputs (trades, ledger events,
+    # sync state): a precomputed ranking entry is valid only while it carries the current value.
+    analysis_revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
+
+
+class SyncState(Base):
+    """Incremental scan cursors. Every signature between head and tail has been processed.
+
+    Signatures are listed newest first, so coverage grows in two directions: catch-up (newer than
+    head, bounded by `until`) and backfill (older than tail, bounded by `before`). An interrupted
+    catch-up keeps its own cursor so the gap between it and head is never silently skipped.
+    """
+
+    __tablename__ = "sync_state"
+    wallet: Mapped[str] = mapped_column(ForeignKey("wallets.address"), primary_key=True)
+    head_signature: Mapped[str | None] = mapped_column(String(88), nullable=True)
+    tail_signature: Mapped[str | None] = mapped_column(String(88), nullable=True)
+    tail_block_time: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Every signature with block_time >= covered_from has been processed (between head and tail).
+    covered_from: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    history_start_reached: Mapped[bool] = mapped_column(Boolean, default=False)
+    catchup_before: Mapped[str | None] = mapped_column(String(88), nullable=True)
+    catchup_head: Mapped[str | None] = mapped_column(String(88), nullable=True)
+    missing_block_times: Mapped[int] = mapped_column(Integer, default=0)
+    # Normalizer version that produced this wallet's trades; a mismatch triggers a local rebuild.
+    normalizer: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # Every finalized signature with block_time in [covered_from, caught_up_at] is stored.
+    caught_up_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # Newest signature handled by the real-time watcher (it never moves head/tail; the sync does).
+    watch_head: Mapped[str | None] = mapped_column(String(88), nullable=True)
+    updated_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+
+
+class RawTransaction(Base):
+    __tablename__ = "raw_transactions"
+    signature: Mapped[str] = mapped_column(String(88), primary_key=True)
+    slot: Mapped[int] = mapped_column(BigInteger)
+    block_time: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    payload: Mapped[dict] = mapped_column(JSON)
+    digest: Mapped[str] = mapped_column(String(64))
+    source: Mapped[str] = mapped_column(String(200))
+    fetched_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+
+
+class Observation(Base):
+    __tablename__ = "observations"
+    __table_args__ = (UniqueConstraint("wallet", "signature"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    wallet: Mapped[str] = mapped_column(ForeignKey("wallets.address"), index=True)
+    signature: Mapped[str] = mapped_column(ForeignKey("raw_transactions.signature"))
+    details: Mapped[dict] = mapped_column(JSON)
+
+
+class EventRecord(Base):
+    __tablename__ = "ledger_events"
+    __table_args__ = (UniqueConstraint("wallet", "signature", "event_index", "token"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    wallet: Mapped[str] = mapped_column(ForeignKey("wallets.address"), index=True)
+    signature: Mapped[str] = mapped_column(String(88), index=True)
+    event_index: Mapped[int] = mapped_column(Integer)
+    token: Mapped[str] = mapped_column(String(44), index=True)
+    timestamp: Mapped[str] = mapped_column(String(40), index=True)
+    payload: Mapped[dict] = mapped_column(JSON)
+    # Owned by the server, deliberately absent from the public import contract.
+    evidence: Mapped[dict] = mapped_column(JSON)
+
+
+class Trade(Base):
+    """Derived from stored RawTransaction evidence by tracker.normalize; rebuildable without RPC."""
+
+    __tablename__ = "trades"
+    __table_args__ = (UniqueConstraint("wallet", "signature", "event_index"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    wallet: Mapped[str] = mapped_column(ForeignKey("wallets.address"), index=True)
+    signature: Mapped[str] = mapped_column(ForeignKey("raw_transactions.signature"), index=True)
+    event_index: Mapped[int] = mapped_column(Integer)
+    mint: Mapped[str] = mapped_column(String(44), index=True)
+    kind: Mapped[str] = mapped_column(String(20))
+    slot: Mapped[int] = mapped_column(BigInteger)
+    block_time: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    # Decimal amounts are stored as strings to keep exact values across SQLite and PostgreSQL.
+    details: Mapped[dict] = mapped_column(JSON)
+    normalizer: Mapped[str] = mapped_column(String(40))
+
+
+class PriceCandle(Base):
+    """Cached 1-minute candle from a public price source; prices are exact decimal strings."""
+
+    __tablename__ = "price_candles"
+    source: Mapped[str] = mapped_column(String(200), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(20), primary_key=True)
+    minute: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    open: Mapped[str] = mapped_column(String(40))
+    high: Mapped[str] = mapped_column(String(40))
+    low: Mapped[str] = mapped_column(String(40))
+    close: Mapped[str] = mapped_column(String(40))
+    fetched_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+
+
+class Job(Base):
+    """Background work item. Rows are claimed by a conditional UPDATE, so one runner wins each job."""
+
+    __tablename__ = "jobs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kind: Mapped[str] = mapped_column(String(20), default="sync")
+    wallet: Mapped[str] = mapped_column(ForeignKey("wallets.address"), index=True)
+    # queued → running → done | failed | cancelled; cancel_requested is honored between transactions.
+    state: Mapped[str] = mapped_column(String(20), index=True, default="queued")
+    params: Mapped[dict] = mapped_column(JSON)
+    origin: Mapped[str] = mapped_column(String(20), default="manual")  # manual | api | schedule | chain
+    parent_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    round: Mapped[int] = mapped_column(Integer, default=1)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    run_after: Mapped[str] = mapped_column(String(40), default=now_iso, index=True)
+    locked_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+    started_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    heartbeat_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    finished_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    progress: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    result: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class WorkerHeartbeat(Base):
+    __tablename__ = "workers"
+    id: Mapped[str] = mapped_column(String(80), primary_key=True)
+    started_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+    heartbeat_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+    info: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class TokenMint(Base):
+    """On-chain mint facts (getMultipleAccounts) plus proof of pump.fun origin. Refreshed periodically."""
+
+    __tablename__ = "token_mints"
+    mint: Mapped[str] = mapped_column(String(44), primary_key=True)
+    exists: Mapped[bool] = mapped_column(Boolean, default=True)
+    program: Mapped[str | None] = mapped_column(String(44), nullable=True)
+    decimals: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    supply_raw: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    mint_authority: Mapped[str | None] = mapped_column(String(44), nullable=True)
+    freeze_authority: Mapped[str | None] = mapped_column(String(44), nullable=True)
+    extensions: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # pump.fun bonding-curve PDA for this mint and whether an account owned by pump.fun exists there.
+    pump_bonding_curve: Mapped[str | None] = mapped_column(String(44), nullable=True)
+    pump_origin: Mapped[bool] = mapped_column(Boolean, default=False)
+    source: Mapped[str] = mapped_column(String(200))
+    fetched_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+
+
+class TokenQuote(Base):
+    """Latest market quote for a mint (mark price). Volatile: never part of an immutable snapshot."""
+
+    __tablename__ = "token_quotes"
+    mint: Mapped[str] = mapped_column(String(44), primary_key=True)
+    found: Mapped[bool] = mapped_column(Boolean, default=False)
+    price_usd: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    liquidity_usd: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    market_cap_usd: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    fdv_usd: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    pair_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    dex_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    symbol: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    source: Mapped[str] = mapped_column(String(200))
+    fetched_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+
+
+class DiscoverySeed(Base):
+    """A token whose earliest buyers are scanned (backward discovery). Winners and failures alike."""
+
+    __tablename__ = "discovery_seeds"
+    mint: Mapped[str] = mapped_column(String(44), primary_key=True)
+    label: Mapped[str] = mapped_column(String(80), default="")
+    scan_address: Mapped[str] = mapped_column(String(44))
+    address_kind: Mapped[str] = mapped_column(String(30))  # pump_bonding_curve | pool
+    # queued → scanning → done | failed; a scan that ran out of page budget goes back to queued.
+    state: Mapped[str] = mapped_column(String(20), index=True, default="queued")
+    params: Mapped[dict] = mapped_column(JSON)
+    list_before: Mapped[str | None] = mapped_column(String(88), nullable=True)
+    pages: Mapped[int] = mapped_column(Integer, default=0)
+    reached_start: Mapped[bool] = mapped_column(Boolean, default=False)
+    oldest: Mapped[list | None] = mapped_column(JSON, nullable=True)  # oldest signatures seen, newest first
+    launch_signature: Mapped[str | None] = mapped_column(String(88), nullable=True)
+    launch_slot: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    launch_time: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    creator: Mapped[str | None] = mapped_column(String(44), nullable=True)
+    outcome: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    declared_peak_cap_usd: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    declared_peak_source: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    locked_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+    heartbeat_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    finished_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
+class EarlyBuy(Base):
+    """A buy among a seed's earliest trades. The wallet is a candidate, not necessarily a tracked wallet."""
+
+    __tablename__ = "early_buys"
+    __table_args__ = (UniqueConstraint("mint", "wallet", "signature", "event_index"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mint: Mapped[str] = mapped_column(ForeignKey("discovery_seeds.mint"), index=True)
+    wallet: Mapped[str] = mapped_column(String(44), index=True)
+    signature: Mapped[str] = mapped_column(String(88))
+    event_index: Mapped[int] = mapped_column(Integer)
+    slot: Mapped[int] = mapped_column(BigInteger)
+    block_time: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    rank: Mapped[int] = mapped_column(Integer)  # 1 = first buyer after launch (ties share a slot)
+    details: Mapped[dict] = mapped_column(JSON)
+
+
+class WalletFunding(Base):
+    """Who sent an address its first SOL (funding origin), looked up from its oldest transactions."""
+
+    __tablename__ = "wallet_funding"
+    address: Mapped[str] = mapped_column(String(44), primary_key=True)
+    # queued → scanning → done | unknown (history too long, no incoming SOL) | failed
+    state: Mapped[str] = mapped_column(String(20), index=True, default="queued")
+    funder: Mapped[str | None] = mapped_column(String(44), nullable=True, index=True)
+    # wallet | high_volume (exchange, router or bot: funds too many unrelated wallets to link them)
+    funder_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    signature: Mapped[str | None] = mapped_column(String(88), nullable=True)
+    block_time: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    lamports: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    requested_by: Mapped[str] = mapped_column(String(20), default="manual")
+    locked_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    heartbeat_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+    fetched_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
+class Alert(Base):
+    """A watchlist event: buy, sell or convergence. `key` makes generation idempotent."""
+
+    __tablename__ = "alerts"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    key: Mapped[str] = mapped_column(String(200), unique=True)
+    kind: Mapped[str] = mapped_column(String(20), index=True)  # buy | sell | convergence
+    wallet: Mapped[str | None] = mapped_column(String(44), nullable=True, index=True)
+    mint: Mapped[str] = mapped_column(String(44), index=True)
+    signature: Mapped[str | None] = mapped_column(String(88), nullable=True)
+    event_time: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # block time of the trade
+    detected_at: Mapped[str | None] = mapped_column(String(40), nullable=True)  # transaction downloaded
+    created_at: Mapped[str] = mapped_column(String(40), default=now_iso, index=True)
+    details: Mapped[dict] = mapped_column(JSON)
+    # Outbound webhook: pending | sent | failed | off (no webhook configured when the alert was created)
+    delivery_state: Mapped[str] = mapped_column(String(20), index=True, default="pending")
+    delivery_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    delivery_error: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    delivered_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    read: Mapped[bool] = mapped_column(Boolean, default=False)
+    # `confirmed`: raised from the transaction as soon as the cluster confirmed it, before it is finalized and stored
+    # as evidence (provisional, no verified USD yet); `finalized` once the stored trade backs it; `dropped` if the
+    # confirmed transaction never finalized.
+    commitment: Mapped[str] = mapped_column(String(20), default="finalized", server_default="finalized", index=True)
+    finalized_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
+class AlertQuote(Base):
+    """Market quote recorded at an alert and at fixed offsets after it (prospective, no hindsight)."""
+
+    __tablename__ = "alert_quotes"
+    __table_args__ = (UniqueConstraint("alert_id", "offset_seconds"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    alert_id: Mapped[int] = mapped_column(ForeignKey("alerts.id"), index=True)
+    mint: Mapped[str] = mapped_column(String(44), index=True)
+    offset_seconds: Mapped[int] = mapped_column(Integer)
+    due_at: Mapped[str] = mapped_column(String(40), index=True)
+    # pending → done | missing (no pair found) | failed (source kept failing)
+    status: Mapped[str] = mapped_column(String(20), index=True, default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    fetched_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    price_usd: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    liquidity_usd: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    source: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+
+class PricePoint(Base):
+    """A swap price seen in a stored transaction (any signer): verifiable, denser than tracked trades alone."""
+
+    __tablename__ = "price_points"
+    __table_args__ = (UniqueConstraint("signature", "event_index", "signer"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mint: Mapped[str] = mapped_column(String(44), index=True)
+    signature: Mapped[str] = mapped_column(String(88))
+    event_index: Mapped[int] = mapped_column(Integer)
+    signer: Mapped[str] = mapped_column(String(44))
+    side: Mapped[str] = mapped_column(String(10))
+    slot: Mapped[int] = mapped_column(BigInteger)
+    block_time: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    price_sol: Mapped[str] = mapped_column(String(60))
+    sol_amount: Mapped[str] = mapped_column(String(60))
+    token_amount: Mapped[str] = mapped_column(String(60))
+
+
+class PriceHistory(Base):
+    """Download state of a mint's pool candles for a time range (third-party OHLCV, resumable)."""
+
+    __tablename__ = "price_histories"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mint: Mapped[str] = mapped_column(String(44), index=True)
+    timeframe: Mapped[str] = mapped_column(String(10))
+    requested_from: Mapped[int] = mapped_column(BigInteger)
+    requested_to: Mapped[int] = mapped_column(BigInteger)
+    # queued → fetching → done | failed (no pool, provider errors); a run out of budget returns to queued
+    state: Mapped[str] = mapped_column(String(20), index=True, default="queued")
+    pool: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    quote_mint: Mapped[str | None] = mapped_column(String(44), nullable=True)
+    dex: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    cursor: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # next `before_timestamp`
+    candles: Mapped[int] = mapped_column(Integer, default=0)
+    requests: Mapped[int] = mapped_column(Integer, default=0)
+    requested_by: Mapped[str] = mapped_column(String(20), default="manual")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    locked_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    heartbeat_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+    finished_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
+class PoolCandle(Base):
+    """OHLC of a pool in its quote token (SOL for SOL pairs), from a third-party source."""
+
+    __tablename__ = "pool_candles"
+    pool: Mapped[str] = mapped_column(String(64), primary_key=True)
+    timeframe: Mapped[str] = mapped_column(String(10), primary_key=True)
+    ts: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    mint: Mapped[str] = mapped_column(String(44), index=True)
+    quote_mint: Mapped[str | None] = mapped_column(String(44), nullable=True)
+    open: Mapped[str] = mapped_column(String(60))
+    high: Mapped[str] = mapped_column(String(60))
+    low: Mapped[str] = mapped_column(String(60))
+    close: Mapped[str] = mapped_column(String(60))
+    volume: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    source: Mapped[str] = mapped_column(String(200))
+
+
+class AlertState(Base):
+    __tablename__ = "alert_state"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    last_trade_id: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class PendingSignature(Base):
+    """A pushed signature not yet available at `finalized`; the watcher retries it."""
+
+    __tablename__ = "pending_signatures"
+    signature: Mapped[str] = mapped_column(String(88), primary_key=True)
+    source: Mapped[str] = mapped_column(String(40))
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+
+
+class AnalysisSnapshot(Base):
+    __tablename__ = "analysis_snapshots"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    wallet: Mapped[str] = mapped_column(ForeignKey("wallets.address"), index=True)
+    as_of: Mapped[str] = mapped_column(String(40), index=True)
+    result: Mapped[dict] = mapped_column(JSON)
+
+
+class RankingEntry(Base):
+    """Precomputed ranking row: the analysis summary of one wallet under one filter set.
+
+    Valid while `revision` equals the wallet's `analysis_revision` and `engine` the running method versions;
+    otherwise it is recomputed (after each sync, by the worker, or when read).
+    """
+
+    __tablename__ = "ranking_entries"
+    __table_args__ = (Index("ix_ranking_entries_order", "filters_key", "eligible", "score"),)
+    wallet: Mapped[str] = mapped_column(ForeignKey("wallets.address"), primary_key=True)
+    filters_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    filters: Mapped[dict] = mapped_column(JSON)
+    revision: Mapped[int] = mapped_column(Integer)
+    engine: Mapped[str] = mapped_column(String(100))
+    as_of: Mapped[str] = mapped_column(String(40))
+    eligible: Mapped[bool] = mapped_column(Boolean)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)  # verified_smart_money, for ordering
+    summary: Mapped[dict] = mapped_column(JSON)  # score, metrics, exclusion reasons, behavior class
+    # Full analysis; saved as an immutable AnalysisSnapshot only when the API returns its id, so syncs that
+    # nobody looks at do not pile up snapshots.
+    result: Mapped[dict] = mapped_column(JSON)
+    snapshot_id: Mapped[str] = mapped_column(String(64), index=True)
+    computed_at: Mapped[str] = mapped_column(String(40), index=True)
+    compute_ms: Mapped[int] = mapped_column(Integer)
+
+
+class User(Base):
+    """A person who signs in to the dashboard (TRACKER_AUTH=on). Roles: viewer < analyst < admin."""
+
+    __tablename__ = "users"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    username: Mapped[str] = mapped_column(String(64), unique=True)
+    password_hash: Mapped[str] = mapped_column(String(200))
+    role: Mapped[str] = mapped_column(String(20))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    failed_logins: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+    last_login_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
+class UserSession(Base):
+    """A signed-in browser. Only the SHA-256 of the cookie value is stored."""
+
+    __tablename__ = "user_sessions"
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+    expires_at: Mapped[str] = mapped_column(String(40), index=True)  # absolute limit
+    last_seen_at: Mapped[str] = mapped_column(String(40), default=now_iso)  # idle limit counts from here
+
+
+class ApiToken(Base):
+    """A personal token for scripts (`Authorization: Bearer trk_…`); only its SHA-256 is stored."""
+
+    __tablename__ = "api_tokens"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(String(80))
+    created_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+    last_used_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class AuditEvent(Base):
+    """Who did what: sign-ins, account changes and every state-changing request."""
+
+    __tablename__ = "audit_events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    at: Mapped[str] = mapped_column(String(40), default=now_iso, index=True)
+    username: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    action: Mapped[str] = mapped_column(String(120))
+    status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    details: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
+class SourceCapture(Base):
+    """Provider response retained privately; never re-served as a raw FOMO dataset."""
+
+    __tablename__ = "source_captures"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    source: Mapped[str] = mapped_column(String(200))
+    captured_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+    digest: Mapped[str] = mapped_column(String(64))
+    payload: Mapped[str] = mapped_column(Text)
+
+
+ANALYSIS_INPUTS = (Trade, EventRecord, SyncState)
+
+
+def bump_analysis_revision(session, wallets) -> None:
+    """Invalidate the precomputed analysis of these wallets (atomic increment, safe across processes)."""
+    if wallets:
+        table = Wallet.__table__
+        session.execute(update(table).where(table.c.address.in_(sorted(wallets)))
+                        .values(analysis_revision=table.c.analysis_revision + 1))
+
+
+@event.listens_for(Session, "before_flush")
+def _track_analysis_inputs(session, _flush_context, _instances):
+    """Every ORM write to an analysis input bumps its wallet's revision in the same transaction. Bulk
+    statements bypass this hook and must call bump_analysis_revision themselves."""
+    touched = {o.wallet for o in (*session.new, *session.deleted) if isinstance(o, ANALYSIS_INPUTS)}
+    touched |= {o.wallet for o in session.dirty if isinstance(o, ANALYSIS_INPUTS) and session.is_modified(o)}
+    bump_analysis_revision(session, touched)
+
+
+def resolve_url(url: str | None = None) -> str:
+    return url or os.getenv("DATABASE_URL", "sqlite:///./.data/tracker.db")
+
+
+def make_engine(url: str | None = None):
+    url = resolve_url(url)
+    if url.startswith("sqlite"):
+        Path(".data").mkdir(exist_ok=True)
+        # The API and the background worker are separate processes: wait for locks instead of failing,
+        # and use WAL so readers are not blocked by the writer.
+        engine = create_engine(url, connect_args={"check_same_thread": False, "timeout": 30})
+
+        @event.listens_for(engine, "connect")
+        def _sqlite_pragmas(connection, _record):
+            cursor = connection.cursor()
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=30000")
+            cursor.close()
+        return engine
+    return create_engine(url, pool_pre_ping=True)
+
+
+def database(url: str | None = None):
+    """Engine and session factory with the schema at the latest Alembic revision (see tracker.migrate)."""
+    from .migrate import ensure_schema
+
+    engine = make_engine(url)
+    ensure_schema(engine)
+    return engine, sessionmaker(engine, expire_on_commit=False)

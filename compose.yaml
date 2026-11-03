@@ -1,0 +1,67 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tracker
+      POSTGRES_DB: tracker
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a local POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U tracker -d tracker"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql+psycopg://tracker:${POSTGRES_PASSWORD:?Set a local POSTGRES_PASSWORD}@postgres:5432/tracker
+      SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
+      FOMO_API_KEY: ${FOMO_API_KEY:-}
+      TRACKER_ACCESS_TOKEN: ${TRACKER_ACCESS_TOKEN:-}
+      # Sign-in for the dashboard and the API: required before the instance is reachable by anyone else.
+      TRACKER_AUTH: ${TRACKER_AUTH:-off}
+      TRACKER_COOKIE_SECURE: ${TRACKER_COOKIE_SECURE:-1}
+      TRACKER_RATE_LIMIT_PER_MINUTE: ${TRACKER_RATE_LIMIT_PER_MINUTE:-600}
+      TRACKER_HOOK_SECRET: ${TRACKER_HOOK_SECRET:-}
+      TRACKER_ALERT_WEBHOOK_URL: ${TRACKER_ALERT_WEBHOOK_URL:-}
+      TRACKER_ALERT_WEBHOOK_FORMAT: ${TRACKER_ALERT_WEBHOOK_FORMAT:-json}
+      TRACKER_ALERT_TELEGRAM_CHAT_ID: ${TRACKER_ALERT_TELEGRAM_CHAT_ID:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  worker:
+    build: ./backend
+    command: [python, -m, tracker.worker]
+    environment:
+      DATABASE_URL: postgresql+psycopg://tracker:${POSTGRES_PASSWORD:?Set a local POSTGRES_PASSWORD}@postgres:5432/tracker
+      SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
+      TRACKER_REFRESH_MINUTES: ${TRACKER_REFRESH_MINUTES:-30}
+      TRACKER_WATCH_SECONDS: ${TRACKER_WATCH_SECONDS:-20}
+      TRACKER_ALERT_WEBHOOK_URL: ${TRACKER_ALERT_WEBHOOK_URL:-}
+      TRACKER_ALERT_WEBHOOK_FORMAT: ${TRACKER_ALERT_WEBHOOK_FORMAT:-json}
+      TRACKER_ALERT_TELEGRAM_CHAT_ID: ${TRACKER_ALERT_TELEGRAM_CHAT_ID:-}
+    depends_on:
+      # The API creates the schema on start; run exactly one worker per database.
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+  frontend:
+    build: ./frontend
+    environment:
+      BACKEND_URL: http://backend:8000
+      TRACKER_ACCESS_TOKEN: ${TRACKER_ACCESS_TOKEN:-}
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+volumes:
+  postgres-data:

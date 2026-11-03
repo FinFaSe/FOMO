@@ -1,0 +1,240 @@
+# Contrato de medición v1
+
+## Contabilidad
+
+Una posición es un ciclo wallet/mint desde balance cero hasta volver a cero, o a **polvo**: si tras una venta o salida
+queda como máximo el 0,01% de la mayor cantidad tenida en el ciclo, el ciclo se cierra y ese resto se da de baja a
+valor cero (su costo remanente se suma al costo asignado, así que el PnL no mejora). Vender o mover después ese polvo
+no abre un ciclo ni cuenta como inventario faltante, y su importe se ignora; si una venta de un ciclo nuevo incluye
+el polvo anterior, solo la parte proporcional del cobro pertenece al ciclo nuevo. Recomprar tras cerrar abre otro ciclo.
+Se reconstruye **todo** el ledger disponible anterior al snapshot, incluso compras anteriores a la ventana, para no
+perder el costo inicial. Se incluyen en la métrica de 90 días los ciclos cuyo cierre cae en `[as_of − 90 días, as_of]`.
+Posiciones abiertas se muestran aparte; su PnL parcial realizado no cuenta como un win ni se mezcla en el ranking.
+
+- Compra: `costo_remanente += gross_usd + fees_usd`, `cantidad += tokens`.
+- Venta: asignar `costo_remanente × cantidad_vendida / cantidad_previa`; restarlo del remanente.
+- Recuperado neto: `gross_usd_venta − fees_usd_venta`.
+- PnL realizado: recuperado neto menos costo asignado a lo vendido.
+- ROI realizado: `100 × PnL_realizado / costo_asignado`. +500% es 6×, +1.000% es 11×.
+- Costo cero, fees o USD desconocidos, inventario faltante, movimientos incompatibles o transferencias contaminan
+  la evaluabilidad. Nunca se inventa un costo cero para una entrada transferida.
+
+Se exige conocer la capitalización circulante de **cada compra** del ciclo, a su fecha, bajo el máximo; FDV es un
+campo diferente. Ni supply actual, precio actual, ATH, FDV ni crecimiento del market cap sustituyen esos datos.
+La salida no requiere cap para calcular ROI si efectivo y costos sí están documentados.
+El ledger conserva declaraciones de FDV/liquidez sin utilizarlas para inferir USD o cap faltantes.
+Precios y cantidades se manejan con `Decimal`; importes en JSON se serializan como strings.
+
+Si varias firmas para el mismo mint tienen exactamente el mismo segundo y no se dispone de orden intrabloque,
+la posición se marca ambigua. Una ordenación lexicográfica determinista no se considera prueba del orden económico.
+El MVP admite movimientos finales de token; no pretende normalizar token rebasing, impuestos Token-2022, MEV,
+bundles, migraciones, perps, NFT o rutas complejas sin un adaptador específico.
+
+## Normalización on-chain (`balance-delta-v4`)
+
+Cada transacción guardada se convierte en eventos por mint a partir de los cambios netos de la wallet, no de
+decodificar instrucciones, de modo que cualquier ruta por un venue reconocido se normaliza igual.
+
+- Tramo SOL = Δlamports de la wallet + Δlamports de cada cuenta de token cuyo `owner` es la wallet + fee de red si
+  la wallet la pagó (`accountKeys[0]`). El rent de sus propias cuentas creadas o cerradas se compensa; el wSOL se
+  cuenta por los lamports de su cuenta y no por su delta de token, para no contarlo dos veces.
+- Un solo token contra una sola contrapartida de signo opuesto (SOL, USDC o USDT) es compra o venta; sin
+  contrapartida es transferencia. Token por token o varias contrapartidas conservan el inventario pero no el
+  precio (`multi_leg_swap_quote_not_allocatable`). Las transacciones fallidas no generan eventos.
+- `verified` exige programa reconocido + firma de la wallet + contrapartida identificada; si no, `inferred`.
+  Verificar la operación no verifica USD ni market cap: siguen `unknown`. Los programas de pools reconocidos son
+  los dueños de los pools que GeckoTerminal lista para cada DEX (comprobado en la cadena con `getMultipleAccounts`;
+  `tracker.crosscheck --venues` lo repite); los agregadores (Jupiter v6, DFlow) cuentan como venue.
+- Un tramo de SOL de hasta 0,003 junto a una contrapartida en stablecoin es rent devuelto por un relayer o la
+  comisión de un servicio: la stablecoin es la contrapartida y el SOL se suma, con su signo, a las comisiones
+  (`other_sol`; un reembolso las reduce). Un tramo de SOL mayor sigue haciendo la operación no asignable.
+- Un tercio de las operaciones reales muestreadas las paga un relayer (terminales de trading): el trader es el
+  firmante dueño del cambio de tokens, no `accountKeys[0]`. Por eso el descubrimiento normaliza para cada firmante.
+- La fee de red se imputa al primer evento de la transacción. Las fees del venue ya están dentro del importe
+  intercambiado (precio efectivo). Propinas (Jito) y rent pagado a cuentas ajenas quedan dentro del costo.
+- Las posiciones en SOL reutilizan el costo promedio ponderado; su ROI difiere del ROI en USD si SOL se movió.
+  El win rate de esa vista es por posición, sin agrupar por token: es exploratorio.
+
+## Valoración USD y market cap de entrada
+
+- SOL/USD = cierre de la vela de 1 minuto de Coinbase Exchange (`SOL-USD`) que contiene el `blockTime`; si ese
+  minuto no tuvo operaciones, la vela más cercana a ≤5 minutos (se registra el desfase). Se guardan `low`/`high`
+  como banda de incertidumbre. Sin vela cercana la operación queda `unpriced` y su posición no es evaluable.
+- `gross_usd` = contrapartida × SOL/USD (o la cantidad de USDC/USDT, a la par); `fees_usd` = fee de red × SOL/USD.
+- Market cap = precio USD por token × límite superior de suministro. Solo se marca `verified` para mints con una
+  operación guardada contra la bonding curve de pump.fun (prueba de origen) y 6 decimales: se crean con
+  1.000.000.000 tokens y sin autoridad de emisión, y las quemas solo reducen el suministro, así que el market cap
+  nunca queda subestimado frente al filtro de market cap máximo. El resto de mints queda `unknown`.
+- Prueba de origen pump.fun: una operación guardada contra la bonding curve, o una cuenta propiedad del programa
+  de pump.fun en la PDA `["bonding-curve", mint]` (derivada con `solders`, leída con `getMultipleAccounts`).
+- Mints sin esa prueba y sin autoridad de emisión: market cap `estimated` = precio × suministro actual. Sin
+  autoridad nadie puede emitir, pero las quemas posteriores a la entrada reducen el suministro actual, así que la
+  estimación puede quedar por debajo del real: se muestra y se usa en métricas exploratorias, nunca en el ranking.
+  Con autoridad de emisión activa: `unknown`.
+- Pyth Benchmarks no se usa: su endpoint público TradingView se retiró el 26 de agosto de 2026.
+
+## Orden dentro del mismo segundo
+
+`blockTime` tiene resolución de un segundo. Los fills de la cadena llevan su slot: transacciones del mismo mint en
+el mismo segundo pero en slots distintos se ordenan por slot y no son ambiguas. En el mismo slot el orden
+intrabloque es desconocido (no se consulta `getBlock`) y la posición se marca `ambiguous_transaction_order`, igual
+que los empates sin slot (ledger importado).
+
+## Posiciones abiertas
+
+PnL no realizado = cantidad × precio actual − costo remanente (costo promedio ponderado). Precio del par con más
+liquidez USD en DEX Screener donde el mint es el token base; caché de 60 s. Es una marca de mercado, no un precio de
+ejecución, y no forma parte de snapshots ni del ranking.
+
+## Historial completo
+
+`history_complete` es verdadero solo si el escaneo incremental cubre `[as_of − días, as_of]`: sin catch-up
+pendiente, `covered_from ≤ inicio de ventana`, `caught_up_at ≥ as_of`, sin `blockTime` ausentes y con todas las
+transacciones normalizadas por la versión vigente. `caught_up_at` es el inicio del escaneo menos 120 s, por el
+retraso de `finalized`. Sin `as_of` explícito, el análisis y el ranking usan el `caught_up_at` de cada wallet.
+Que un listado de firmas termine solo prueba el inicio de la wallet si el proveedor guarda todo el historial
+(`getFirstAvailableBlock` = 0); con un proveedor que solo guarda días recientes, la cobertura se queda en la firma
+más antigua listada (`rpc_history_horizon`).
+El ranking y el análisis sin `as_of` se sirven de entradas precalculadas por wallet y filtros. Una entrada es
+válida solo mientras la revisión de análisis de la wallet (que sube con cualquier cambio en sus operaciones,
+eventos o estado de sync) y la versión del método coinciden; si no, se recalcula antes de responder. Por eso
+servirla equivale exactamente a recalcular. Una wallet sin sync completa se analiza a «ahora» y no se cachea.
+
+## Descubrimiento hacia atrás
+
+- Semilla = token cuyas primeras operaciones se escanean. Para mints de pump.fun se lista la PDA de su bonding curve
+  (toda operación en la curva la toca) hasta la firma más antigua, que es la creación; para otros tokens, el pool
+  indicado. Se procesan las primeras N transacciones no fallidas (100 por defecto) con el mismo normalizador.
+- Cada compra registra rango (orden de aparición; el orden intrabloque no es exacto), minutos tras la creación,
+  market cap de entrada (vela SOL/USD × 1e9 si la creación usó el programa de pump.fun; si no, estimado o
+  desconocido como en el resto) y marcas: `creator` (firmante de la creación), `launch_tx` (compra en la propia
+  creación) y `launch_slot` (mismo bloque que la creación, típico de bundles y snipers). Por defecto los candidatos
+  excluyen wallets con marcas.
+- Pico de la semilla = máximo de: market cap de las operaciones escaneadas, market cap actual de DEX Screener y un
+  pico declarado opcional. Es un límite inferior del pico real (no hay historial OHLC verificado), así que un
+  acierto (`pico ≥ múltiplo × entrada`) nunca se concede de más; los aciertos que dependen de un pico declarado se
+  cuentan aparte.
+- Sesgo de supervivencia: la tasa de aciertos solo es informativa si las semillas incluyen fracasos. Los candidatos
+  no entran al ranking por sí mismos: hay que sincronizarlos y superar la validación normal.
+
+## Bots, insiders y wallets vinculadas
+
+- **Comportamiento** (parte del snapshot, versión `wac-wilson-token-v3`): posiciones cerradas cuyo primer y último
+  fill están a ≤ 2 slots (compra-venta en el mismo bloque o el siguiente, típico de MEV), posiciones de ≤ 60 s y
+  máximo de compras+ventas en un día UTC. «Probable bot»: ≥ 3 compra-venta en ≤ 2 bloques, ≥ 300 operaciones en un
+  día o ≥ 50% de posiciones de ≤ 60 s con ≥ 10 cerradas; excluye del ranking. «Posible bot» (≥ 1, ≥ 100, ≥ 25% con
+  ≥ 5) solo se muestra. Umbrales en `tracker/analytics.py`.
+- **Propinas Jito**: lamports que reciben las ocho cuentas de propinas de Jito en transacciones que paga la wallet;
+  se restan del tramo SOL y se suman a las fees (el PnL no cambia, el precio efectivo deja de incluirlas). La
+  lista coincidió el 3 de noviembre de 2026 con `getTipAccounts` del block engine de Jito; `tracker.smoke` lo
+  vuelve a comprobar en cada ejecución.
+- **Origen de fondos**: se listan las firmas de la dirección hasta la primera (máx. 10 páginas de 1.000; si no
+  alcanza, `history_too_long`) y, entre sus 10 transacciones más antiguas, la primera en la que recibe lamports en
+  una transacción que paga otra dirección: esa es su financiadora. Si las últimas 1.000 firmas de la financiadora
+  caben en menos de 24 h se clasifica `high_volume` y no se usa para vincular.
+- **Vínculos**: `funded_by` (la financiadora es otra dirección conocida), `same_funder` (misma financiadora
+  `wallet`) y `co_buy` (compras de la misma semilla a ≤ 1 slot en ≥ 2 semillas). Las entidades son componentes
+  conexos. Indican posible control común, no lo prueban, y no se dan de baja automáticamente del ranking: se
+  señalan para que no cuenten como confirmaciones independientes.
+- **Insiders en descubrimiento**: `funded_by_creator`, `funded_creator`, `shares_funder_with_creator` y
+  `linked_to_creator`; como las marcas de lanzamiento, excluyen al candidato salvo que se pidan.
+- **Copiabilidad**: `price_move_{5,30,60}s` = precio de la primera operación escaneada a partir de ese desfase
+  ÷ precio de la compra − 1 (solo dentro de las primeras N operaciones escaneadas); `size_vs_curve` = SOL de la
+  compra ÷ SOL de la bonding curve antes de ella.
+
+## Alertas
+
+- Se generan a partir de las operaciones guardadas (stream, vigilante, webhook o sync), recorriendo las nuevas desde
+  un cursor; la clave de cada alerta (tipo, wallet, firma, evento) las hace idempotentes, también tras reconstruir y
+  aunque el stream y el vigilante detecten la misma operación a la vez.
+- Solo wallets de la watchlist y operaciones con `blockTime` de hace como máximo 10 min (configurable).
+- Convergencia: compras del mismo mint por wallets de la watchlist en `[t − ventana, t]`, contando grupos (entidades)
+  distintos; se emite al alcanzar el mínimo y cada vez que el número de grupos sube.
+- Tiempos: `event_time` (bloque), `detected_at` (primera detección: notificación del stream, o descarga de la
+  transacción) y `created_at` (alerta); quedan guardados para backtests con un retraso realista. Una alerta no es una
+  recomendación: la wallet puede ser un bot o estar vinculada; esos datos están en su perfil.
+- **Provisionales**: una compra o venta se puede alertar desde la transacción en `confirmed` (votada por la
+  supermayoría, ~1 s tras el bloque) antes de `finalized` (~13 s). Es la misma normalización, pero la transacción
+  aún no es evidencia guardada: el USD usa el último SOL/USD disponible (no el de su minuto) y no hay market cap.
+  Al guardarse la transacción finalizada, la alerta (misma clave) se completa con la operación valorada y conserva
+  los valores provisionales en `details.provisional`. Una transacción confirmada que la red no conoce tras 5 min, o
+  que falló, deja la alerta en `dropped`. Ningún análisis, ranking ni backtest usa datos no finalizados.
+
+## Backtesting de copia
+
+- **Reconstrucción histórica**: operaciones del líder con contrapartida SOL en la ventana, en orden. Para un retraso
+  `d`, cada copia se ejecuta al primer precio observado del mint con `blockTime ≥ t + d` (operaciones guardadas de
+  cualquier wallet y compras tempranas de semillas) y a no más de `max_staleness_seconds`; si no hay, no se ejecuta.
+  Compra: tamaño fijo en SOL al precio × (1 + deslizamiento + impacto × tamaño) más coste por transacción. Venta:
+  la misma fracción que vende el líder de su posición (venta total si se queda en polvo o si su posición es
+  desconocida), al precio × (1 − deslizamiento − impacto × valor) menos coste. Costo promedio ponderado. Las
+  decisiones solo usan la operación del líder; el precio de ejecución es el primero observado después del retraso,
+  nunca uno anterior. Retraso 0 usa el precio del líder (referencia ideal). El ROI del líder se calcula sobre los
+  mismos mints cerrados por la copia. Limitación principal: las observaciones son escasas y sesgadas hacia lo
+  sincronizado.
+- **Con historial de precios**: para un objetivo `t + d`, primero un precio on-chain (operaciones guardadas, puntos de
+  precio de transacciones escaneadas, compras tempranas) en `[t + d, t + d + min(60 s, staleness)]`; si no hay, la
+  vela de pool de 1 min que cubre `t + d` (el precio real estuvo en su rango) con ejecución pesimista: compra al
+  máximo y vende al mínimo; si tampoco, el primer precio on-chain dentro de `staleness`. Solo velas cotizadas en SOL.
+  Las velas son de un tercero (GeckoTerminal) y se identifican como tales en cada ejecución (`source`).
+- **Seguimiento prospectivo**: cotizaciones registradas al crear cada alerta de compra/venta y 5 y 60 min después
+  (se guarda la hora real de captura). Entrada = cotización de la alerta × (1 + deslizamiento); salida a 5/60 min o
+  a la cotización de la siguiente alerta de venta del mismo líder y mint, × (1 − deslizamiento). Es la única
+  evaluación sin información futura; la reconstrucción histórica no la sustituye.
+
+## Historial de precios
+
+- `price_points`: compras/ventas con contrapartida SOL en transacciones guardadas, por firmante (normalizador
+  vigente). Son hechos on-chain verificables.
+- `pool_candles`: OHLC del pool más profundo de cada token donde es token base (preferencia por cotización SOL),
+  en moneda de cotización (`currency=token`), de GeckoTerminal. Datos de terceros: se usan para el pico de las
+  semillas (`peak_basis = pool_ohlcv`, con el suministro verificado de pump.fun o el estimado) y para ejecuciones
+  pesimistas del backtest; nunca como evidencia de una operación.
+
+## Muestra y consistencia
+
+El win rate observado es `ciclos con PnL > 0 / ciclos cerrados evaluables`; break-even permanece en el denominador.
+Para el intervalo de Wilson 95% se agrega el PnL de los ciclos evaluables por **mint** en la ventana y se considera
+acierto del grupo si el total es positivo. El número de mints es la muestra efectiva usada por el intervalo.
+No se presenta este intervalo como una garantía: tokens distintos pueden compartir factores/entidades y no ser independientes.
+El mínimo de 30 corresponde a ciclos evaluables; un número pequeño de mints se refleja en el intervalo y el score.
+
+El ranking exige el 60% observado **y**, por defecto, límite inferior Wilson ≥60%, además de al menos un gran
+ganador realizado temprano, historial completo y todas las posiciones evaluables con swaps, valoraciones y cap verificados.
+El análisis de una importación puede mostrar cifras provisionales; nunca crea alta confianza con una URL y una firma.
+
+## Score exploratorio
+
+Pesos iniciales: 25 consistencia, 20 frecuencia ≥umbral de gran ganador, 15 frecuencia ≥1.000%, 15 retorno/riesgo,
+10 entradas tempranas, 10 replicabilidad y 5 calidad. Los filtros son configurables; pesos y método quedan versionados
+en esta fase (no se ofrece aún un editor de ponderaciones).
+
+- Ajuste de muestra `n_tokens / (n_tokens + 30)` para consistencia y retorno/riesgo.
+- Consistencia = semanas UTC con PnL positivo / todas las semanas UTC tocadas por la ventana, incluidas inactivas.
+- Frecuencias temprana y de grandes ganadores usan límite inferior Wilson por mint.
+- Retorno/riesgo = ROI agregado positivo acotado a 1, reducido por muestra y drawdown de PnL realizado/costo asignado.
+- Replicabilidad = **0** mientras no exista backtest neto después de alerta; riesgo de copia **desconocido**.
+- Calidad = proporción de posiciones con prueba completa multiplicada por cobertura completa del historial.
+- Concentración: se resta al score una fracción `max(0, cuota_del_mayor_beneficio − 0,5)`, hasta 50%.
+
+Una curva de PnL realizado no es una curva de patrimonio: el drawdown resultante no mide pérdidas flotantes.
+Wash trading, vínculo con deployers y liquidez insuficiente aún no se detectan automáticamente. No se afirma ausencia
+de esas condiciones, fraude o replicabilidad sin evidencia. El score exploratorio no es recomendación de inversión.
+
+## Procedencia y snapshots
+
+Cada RPC conserva respuesta original, origen sin claves, slot, timestamp original, fecha de captura y SHA-256.
+Duplicados no cambian evidencia; una respuesta finalized distinta genera conflicto, no sobrescritura.
+La sincronización incremental reutiliza la evidencia almacenada sin volver a pedirla; la comparación con
+una nueva descarga ocurre al **Verificar ledger** y en el modo `revalidate`. La cobertura de firmas se
+registra por wallet (`sync_state`): todo lo listado entre `head` y `tail` está almacenado, y
+`covered_from` indica desde qué `blockTime` la ventana está completa. Esto describe firmas, no swaps
+normalizados: `normalized_history_complete` sigue siendo falso.
+Un registro ausente o proveedor incompleto no se trata automáticamente como reorganización probada.
+Las transacciones fallidas se almacenan como tales sin convertirlas en trades. Una verificación por delta coincidente
+no verifica el intercambio económico ni el precio USD. Importaciones no aceptan campos de verificación del servidor.
+
+Snapshot = SHA-256 de versión de método, wallet, `as_of`, filtros, entradas canónicas y procedencia consumida.
+`GET /api/snapshots/{id}` devuelve el resultado inmutable. El mismo ledger, evidencia, filtros y reloj produce el mismo ID.
+Cambiar evidencia o parámetros crea otro ID; no se sobrescribe un análisis anterior. No se consumen fills posteriores a `as_of`.
+Un snapshot recalculado hoy sobre capturas históricas no equivale a observación prospectiva que existiera entonces.
