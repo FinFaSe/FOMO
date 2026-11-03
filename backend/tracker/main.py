@@ -63,6 +63,8 @@ from .schemas import (
     utc,
 )
 from .service import chain_positions, import_ledger, renormalize, verify_ledger, wallet_analysis, wallet_fills
+from .stream import Stream
+from .stream import enabled as stream_enabled
 from .tokens import PUMP_PROGRAM, pump_bonding_curve
 from .watch import Watcher, push_signatures
 
@@ -79,6 +81,9 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None, quot
             if watcher.interval > 0:
                 threading.Thread(target=watcher.run_forever, args=(stop,), daemon=True,
                                  name="tracker-watcher").start()
+            if stream_enabled():
+                stream = Stream(sessions, rpc, prices)
+                threading.Thread(target=stream.run_forever, args=(stop,), daemon=True, name="tracker-stream").start()
         yield
         stop.set()
 

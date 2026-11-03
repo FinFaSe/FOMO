@@ -6,6 +6,7 @@ import tempfile
 # `tracker.main` builds its module-level app on import, which opens (and migrates) DATABASE_URL. Tests must
 # never touch a developer's real database, so point it at a throwaway one before any test module imports it.
 os.environ["DATABASE_URL"] = f"sqlite:///{tempfile.mkdtemp(prefix='fomo-tests-')}/import.db"
+os.environ["TRACKER_STREAM"] = "0"  # an embedded worker must never open a WebSocket to the real cluster in tests
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal

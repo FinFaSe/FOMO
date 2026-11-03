@@ -155,19 +155,28 @@ La correlación entre tokens aún puede reducir la independencia. Ver [método](
      con él o que está vinculado a él queda marcado y excluido por defecto.
    - **¿Se puede copiar?**: para cada compra temprana se mide cuánto se movió el precio 5/30/60 s después y su
      tamaño frente al SOL de la curva; los candidatos muestran la mediana.
-7. **Alertas** (pestaña propia): el worker arranca un **vigilante** que cada `TRACKER_WATCH_SECONDS` (20 s)
-   pide, para cada wallet de la watchlist ya sincronizada, solo las firmas posteriores a la última vista; guarda
-   esas transacciones y operaciones sin mover los cursores de la sync (que luego no las descarga otra vez), las
-   valora y genera alertas. Tipos: **compra**, **venta** y **convergencia** (`TRACKER_CONVERGENCE_MIN` = 3 grupos
-   distintos comprando el mismo token en `TRACKER_CONVERGENCE_MINUTES` = 60; las wallets vinculadas cuentan una
-   vez; una alerta nueva por cada nivel alcanzado). Solo alertan operaciones de los últimos
-   `TRACKER_ALERT_MAX_AGE_MINUTES` (10), venga de donde venga la operación. Cada alerta guarda hora del bloque,
-   de detección y de aviso (retraso medido). Como se usa `finalized`, el retraso mínimo es el de finalización
-   (~15 s) más el intervalo del vigilante.
+7. **Alertas** (pestaña propia). Tipos: **compra**, **venta** y **convergencia** (`TRACKER_CONVERGENCE_MIN` = 3
+   grupos distintos comprando el mismo token en `TRACKER_CONVERGENCE_MINUTES` = 60; las wallets vinculadas cuentan
+   una vez; una alerta nueva por cada nivel alcanzado). Solo alertan operaciones de los últimos
+   `TRACKER_ALERT_MAX_AGE_MINUTES` (10). Cada alerta guarda hora del bloque, de detección y de aviso (retraso
+   medido) y por qué vía se detectó (`detected_by`).
+   - **Stream en tiempo real** (`tracker/stream.py`, WebSocket): el worker mantiene una suscripción
+     `logsSubscribe` (`confirmed`) por wallet de la watchlist ya sincronizada en `SOLANA_WS_URL` (por defecto la
+     URL del RPC con `wss://`). Al llegar una notificación descarga la transacción en `confirmed` (reintentando
+     unos segundos: el nodo que la sirve suele ir por detrás del que avisa) y lanza una **alerta provisional**
+     (`commitment = confirmed`): importes de la transacción, USD con el último SOL/USD (`≈`), sin market cap.
+     ~15 s después guarda la transacción `finalized` como evidencia y **completa la misma alerta** (USD y market
+     cap verificados; `finalized`). Si nunca finaliza queda `dropped`. La convergencia se calcula solo con
+     operaciones finalizadas. Reconecta solo; `TRACKER_STREAM=0` lo desactiva.
+   - **Vigilante de respaldo**: cada `TRACKER_WATCH_SECONDS` (20 s) pide, para cada wallet de la watchlist, las
+     firmas posteriores a la última vista (en `confirmed`); lo no finalizado alerta de forma provisional igual
+     que el stream y se guarda en una ronda posterior. Guarda sin mover los cursores de la sync (que luego no
+     descarga otra vez) y repasa las alertas provisionales que no se completaron
+     (`getSignatureStatuses`: finalizadas → se guardan; desconocidas tras 5 min o fallidas → `dropped`).
    - **Webhook entrante** para proveedores que empujan transacciones (Helius, QuickNode…):
      `POST /api/hooks/transactions` con cabecera `X-Tracker-Hook-Secret: $TRACKER_HOOK_SECRET`; acepta
-     `[{"signature": …}]`, `{"signatures": […]}` u objetos con `transaction.signatures`. Lo no finalizado se
-     reintenta. No usa `TRACKER_ACCESS_TOKEN` (tiene su propio secreto).
+     `[{"signature": …}]`, `{"signatures": […]}` u objetos con `transaction.signatures`. Lo no finalizado alerta
+     de forma provisional y se reintenta. No usa `TRACKER_ACCESS_TOKEN` (tiene su propio secreto).
    - **Webhook saliente** opcional: `TRACKER_ALERT_WEBHOOK_URL` (HTTPS) con `TRACKER_ALERT_WEBHOOK_FORMAT` =
      `json` | `slack` | `discord` | `telegram` (este último con `TRACKER_ALERT_TELEGRAM_CHAT_ID` y la URL
      `https://api.telegram.org/bot<token>/sendMessage`). Tres intentos por alerta. La URL es un secreto: nunca se
@@ -285,6 +294,7 @@ Variables opcionales:
 | `TRACKER_REFRESH_MINUTES` | Worker: intervalo de resincronización de la watchlist (30; 0 desactiva) |
 | `TRACKER_EMBEDDED_WORKER` | `1` ejecuta el worker como hilo de la API (solo uso local) |
 | `TRACKER_WATCH_SECONDS` | Vigilante de la watchlist: intervalo en segundos (20; 0 desactiva) |
+| `TRACKER_STREAM` / `SOLANA_WS_URL` | Stream WebSocket de la watchlist (`0` lo desactiva) y su endpoint (por defecto el RPC con `wss://`) |
 | `TRACKER_ALERT_MAX_AGE_MINUTES` | Antigüedad máxima de una operación para alertar (10) |
 | `TRACKER_CONVERGENCE_MIN` / `TRACKER_CONVERGENCE_MINUTES` | Convergencia: grupos distintos (3) y ventana (60) |
 | `TRACKER_HOOK_SECRET` | Activa y protege el webhook entrante `/api/hooks/transactions` |

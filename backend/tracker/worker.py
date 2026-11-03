@@ -1,8 +1,9 @@
 """Background worker: `python -m tracker.worker` (same environment variables as the API).
 
 Run exactly one worker per database. TRACKER_REFRESH_MINUTES (default 30, 0 disables) sets how often
-watchlist wallets are re-synced. A watcher thread polls watchlist wallets every TRACKER_WATCH_SECONDS
-(default 20, 0 disables) for near-real-time alerts; both share one rate-limited RPC client. Stop with Ctrl+C or SIGTERM; the job in progress stops after its
+watchlist wallets are re-synced. A stream thread (tracker.stream, WebSocket; TRACKER_STREAM=0 disables) alerts on
+watchlist trades a second or two after the block; a watcher thread polls the watchlist every TRACKER_WATCH_SECONDS
+(default 20, 0 disables) as its fallback. All three share one rate-limited RPC client. Stop with Ctrl+C or SIGTERM; the job in progress stops after its
 current transaction and resumes from the stored cursors next time.
 """
 
@@ -16,6 +17,8 @@ from .adapters.quotes import DexScreenerQuotes
 from .adapters.solana import SolanaRPC
 from .db import database
 from .jobs import Worker
+from .stream import Stream
+from .stream import enabled as stream_enabled
 from .watch import Watcher
 
 
@@ -29,6 +32,9 @@ def main():
     watcher = Watcher(sessions, rpc, prices, quotes=quotes)
     if watcher.interval > 0:
         threading.Thread(target=watcher.run_forever, args=(stop,), daemon=True, name="tracker-watcher").start()
+    if stream_enabled():
+        stream = Stream(sessions, rpc, prices)
+        threading.Thread(target=stream.run_forever, args=(stop,), daemon=True, name="tracker-stream").start()
     Worker(sessions, rpc, prices, quotes=quotes, history=GeckoTerminal()).run_forever(stop)
 
 

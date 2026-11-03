@@ -144,15 +144,21 @@ servirla equivale exactamente a recalcular. Una wallet sin sync completa se anal
 
 ## Alertas
 
-- Se generan a partir de las operaciones guardadas (vigilante, webhook o sync), recorriendo las nuevas desde un
-  cursor; la clave de cada alerta (tipo, wallet, firma, evento) las hace idempotentes, también tras reconstruir.
+- Se generan a partir de las operaciones guardadas (stream, vigilante, webhook o sync), recorriendo las nuevas desde
+  un cursor; la clave de cada alerta (tipo, wallet, firma, evento) las hace idempotentes, también tras reconstruir y
+  aunque el stream y el vigilante detecten la misma operación a la vez.
 - Solo wallets de la watchlist y operaciones con `blockTime` de hace como máximo 10 min (configurable).
 - Convergencia: compras del mismo mint por wallets de la watchlist en `[t − ventana, t]`, contando grupos (entidades)
   distintos; se emite al alcanzar el mínimo y cada vez que el número de grupos sube.
-- Tiempos: `event_time` (bloque), `detected_at` (descarga de la transacción) y `created_at` (alerta). El retraso de
-  detección incluye la finalización (`finalized`) y el intervalo de sondeo; quedan guardados para un backtest futuro
-  con un retraso realista. Una alerta no es una recomendación: la wallet puede ser un bot o estar vinculada; esos
-  datos están en su perfil.
+- Tiempos: `event_time` (bloque), `detected_at` (primera detección: notificación del stream, o descarga de la
+  transacción) y `created_at` (alerta); quedan guardados para backtests con un retraso realista. Una alerta no es una
+  recomendación: la wallet puede ser un bot o estar vinculada; esos datos están en su perfil.
+- **Provisionales**: una compra o venta se puede alertar desde la transacción en `confirmed` (votada por la
+  supermayoría, ~1 s tras el bloque) antes de `finalized` (~13 s). Es la misma normalización, pero la transacción
+  aún no es evidencia guardada: el USD usa el último SOL/USD disponible (no el de su minuto) y no hay market cap.
+  Al guardarse la transacción finalizada, la alerta (misma clave) se completa con la operación valorada y conserva
+  los valores provisionales en `details.provisional`. Una transacción confirmada que la red no conoce tras 5 min, o
+  que falló, deja la alerta en `dropped`. Ningún análisis, ranking ni backtest usa datos no finalizados.
 
 ## Backtesting de copia
 

@@ -257,8 +257,9 @@ def schedule_refresh(session, every: timedelta, request: JobRequest) -> int:
 def worker_status(session) -> dict:
     alive_after = (_now() - WORKER_ALIVE).isoformat()
     rows = list(session.scalars(select(WorkerHeartbeat).order_by(WorkerHeartbeat.heartbeat_at.desc()).limit(10)))
-    workers = [w for w in rows if not w.id.startswith("watcher:")]
+    workers = [w for w in rows if not w.id.startswith(("watcher:", "stream:"))]
     watchers = [w for w in rows if w.id.startswith("watcher:")]
+    streams = [w for w in rows if w.id.startswith("stream:")]
     counts = {state: session.scalar(select(func.count()).select_from(Job).where(Job.state == state))
               for state in ("queued", "running")}
 
@@ -274,7 +275,11 @@ def worker_status(session) -> dict:
     return {"alive": any(w.heartbeat_at >= alive_after for w in workers), **counts,
             "workers": [view(w) for w in workers[:5]],
             "watcher_alive": any(watcher_alive(w) for w in watchers),
-            "watchers": [view(w) for w in watchers[:5]], "ranking": ranking_status(session)}
+            "watchers": [view(w) for w in watchers[:5]],
+            # The stream beats every few seconds while connected and after each reconnection attempt.
+            "stream_connected": any(w.heartbeat_at >= (_now() - timedelta(seconds=60)).isoformat()
+                                    and (w.info or {}).get("connected") for w in streams),
+            "streams": [view(w) for w in streams[:5]], "ranking": ranking_status(session)}
 
 
 class Worker:

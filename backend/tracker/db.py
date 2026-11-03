@@ -291,6 +291,11 @@ class Alert(Base):
     delivery_error: Mapped[str | None] = mapped_column(String(300), nullable=True)
     delivered_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
     read: Mapped[bool] = mapped_column(Boolean, default=False)
+    # `confirmed`: raised from the transaction as soon as the cluster confirmed it, before it is finalized and stored
+    # as evidence (provisional, no verified USD yet); `finalized` once the stored trade backs it; `dropped` if the
+    # confirmed transaction never finalized.
+    commitment: Mapped[str] = mapped_column(String(20), default="finalized", server_default="finalized", index=True)
+    finalized_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
 
 class AlertQuote(Base):

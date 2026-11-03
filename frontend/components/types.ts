@@ -81,6 +81,8 @@ export type WorkerStatus = {
   alive: boolean; queued: number; running: number; watcher_alive?: boolean;
   watchers?: { id: string; heartbeat_at: string; alive: boolean; info: { interval_seconds?: number; watching?: number } | null }[];
   workers: { id: string; heartbeat_at: string; alive: boolean; info: { refresh_minutes?: number } | null }[];
+  stream_connected?: boolean;
+  streams?: { id: string; heartbeat_at: string; alive: boolean; info: { host?: string; subscriptions?: number; notifications?: number; reconnects?: number } | null }[];
 };
 export type OpenPosition = {
   token: string; cycle: number; opened_at: string; symbol: string | null; quantity: string;
@@ -119,7 +121,8 @@ export type AlertItem = {
   id: number; kind: string; wallet: string | null; mint: string; signature: string | null; event_time: string | null;
   created_at: string; detection_seconds: number | null; alert_seconds: number | null; transaction_url: string | null;
   read: boolean; delivery: { state: string; attempts: number; error: string | null };
-  details: { label?: string; symbol?: string | null; usd?: string | null; quote_amount?: string | null; quote_asset?: string | null;
+  commitment: "confirmed" | "finalized" | "dropped"; finalized_at: string | null;
+  details: { label?: string; symbol?: string | null; usd?: string | null; usd_basis?: string | null; quote_amount?: string | null; quote_asset?: string | null;
     market_cap_usd?: string | null; market_cap_status?: string; venues?: string[]; entities?: number; window_minutes?: number;
     participants?: { wallet: string; label: string; block_time: string; usd: string | null }[] };
 };

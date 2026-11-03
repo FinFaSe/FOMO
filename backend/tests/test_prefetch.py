@@ -94,13 +94,17 @@ def test_stored_and_observed_transactions_are_not_downloaded_again(client):
 
 
 def test_adapter_overlaps_slow_responses_but_spaces_request_starts():
-    starts, lock = [], threading.Lock()
+    starts, lock, flight = [], threading.Lock(), {"now": 0, "max": 0}
 
     def transport(request):
         signature = json.loads(request.content)["params"][0]
         with lock:
             starts.append(time.monotonic())
+            flight["now"] += 1
+            flight["max"] = max(flight["max"], flight["now"])
         time.sleep(0.2)
+        with lock:
+            flight["now"] -= 1
         if signature == "missing":
             return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": None})
         return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1,
@@ -109,10 +113,8 @@ def test_adapter_overlaps_slow_responses_but_spaces_request_starts():
     rpc = SolanaRPC("https://rpc.example.org", httpx.Client(transport=httpx.MockTransport(transport)),
                     min_interval=0.05, concurrency=4)
     signatures = [f"sig{i}" for i in range(7)] + ["missing"]
-    started = time.monotonic()
     got = rpc.transactions(signatures)
-    elapsed = time.monotonic() - started
-    assert elapsed < 1.0  # one by one: 8 × 0.2 s = 1.6 s
+    assert 2 <= flight["max"] <= 4  # slow responses overlap, bounded by the concurrency (one by one: 1)
     assert all(got[s]["transaction"]["signatures"] == [s] for s in signatures[:-1])
     assert isinstance(got["missing"], ProviderError) and got["missing"].status == 409
     ordered = sorted(starts)

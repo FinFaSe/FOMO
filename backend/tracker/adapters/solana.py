@@ -117,8 +117,9 @@ class SolanaRPC:
             self._full_history = (now, self.call("getFirstAvailableBlock", []) == 0)
         return self._full_history[1]
 
-    def signatures(self, wallet: str, *, before: str | None = None, until: str | None = None, limit: int = 10):
-        opts = {"commitment": "finalized", "limit": limit}
+    def signatures(self, wallet: str, *, before: str | None = None, until: str | None = None, limit: int = 10,
+                   commitment: str = "finalized"):
+        opts = {"commitment": commitment, "limit": limit}
         if before:
             opts["before"] = before
         if until:
@@ -138,14 +139,29 @@ class SolanaRPC:
             raise ProviderError("Respuesta getMultipleAccounts inválida")
         return values
 
-    def transaction(self, signature: str):
-        result = self.call("getTransaction", [signature, {"commitment": "finalized", "encoding": "jsonParsed",
+    def transaction(self, signature: str, *, commitment: str = "finalized"):
+        result = self.call("getTransaction", [signature, {"commitment": commitment, "encoding": "jsonParsed",
                                                          "maxSupportedTransactionVersion": 1}])
         if result is None:
-            raise ProviderError("Transacción no disponible en finalized; no se cuenta como verificada", 409)
+            raise ProviderError(f"Transacción no disponible en {commitment}; no se cuenta como verificada", 409)
         if signature not in result.get("transaction", {}).get("signatures", []):
             raise ProviderError("La firma devuelta por RPC no corresponde a la solicitada")
         return result
+
+    def confirmed_transaction(self, signature: str):
+        """`confirmed` (supermajority voted, ~1 s after the block) instead of `finalized` (~13 s): for provisional
+        alerts only; stored evidence stays finalized."""
+        return self.transaction(signature, commitment="confirmed")
+
+    def signature_statuses(self, signatures: list[str]) -> list[dict | None]:
+        """getSignatureStatuses with history search: None for a signature the cluster does not know."""
+        if len(signatures) > 256:
+            raise ValueError("getSignatureStatuses admite como máximo 256 firmas")
+        result = self.call("getSignatureStatuses", [signatures, {"searchTransactionHistory": True}])
+        values = result.get("value") if isinstance(result, dict) else None
+        if not isinstance(values, list) or len(values) != len(signatures):
+            raise ProviderError("Respuesta getSignatureStatuses inválida")
+        return values
 
     def transactions(self, signatures: list[str]) -> dict[str, dict | ProviderError]:
         """Several transactions fetched concurrently; each value is the payload or the ProviderError it raised."""

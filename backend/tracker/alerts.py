@@ -7,6 +7,12 @@ wallets (same funder, co-buys) count once, so one actor with five wallets is not
 
 Each alert keeps the trade's block time, when the transaction was downloaded and when the alert was created, so
 detection and alert latency can be measured (and later used to backtest copying with a realistic delay).
+
+Low latency: the stream (WebSocket) and the watcher raise a *provisional* alert (`commitment = confirmed`) from the
+transaction as soon as the cluster confirms it (~1 s after the block instead of ~13 s for finalized), with USD from
+the latest SOL/USD candle and no market cap. When the finalized transaction is stored as evidence, the same alert
+(same key) is completed from the valued trade and becomes `finalized`; if it never finalizes it becomes `dropped`.
+Convergence is computed from stored (finalized) trades only.
 """
 
 import os
@@ -16,14 +22,28 @@ from decimal import Decimal
 
 import httpx
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from .adapters.solana import ProviderError
 from .backtest import schedule_alert_quotes
-from .db import Alert, AlertState, RawTransaction, TokenQuote, Trade, Wallet, now_iso
+from .db import (
+    Alert,
+    AlertState,
+    PendingSignature,
+    PriceCandle,
+    RawTransaction,
+    TokenQuote,
+    Trade,
+    Wallet,
+    now_iso,
+)
 from .entities import entity_index
+from .normalize import normalize
 
 KINDS = ("buy", "sell", "convergence")
 MAX_DELIVERY_ATTEMPTS = 3
+SETTLE_AFTER_SECONDS = 90  # provisional alerts not finalized by then are checked against the cluster
+DROP_AFTER_SECONDS = 300  # ... and dropped if the cluster still does not know (or failed) the transaction
 
 
 def settings() -> dict:
@@ -48,6 +68,7 @@ def alert_json(a: Alert) -> dict:
             "detection_seconds": _seconds_since(a.event_time, a.detected_at),
             "alert_seconds": _seconds_since(a.event_time, a.created_at),
             "transaction_url": f"https://solscan.io/tx/{a.signature}" if a.signature else None,
+            "commitment": a.commitment, "finalized_at": a.finalized_at,
             "details": a.details, "read": a.read, "delivery": {"state": a.delivery_state,
                                                                "attempts": a.delivery_attempts,
                                                                "error": a.delivery_error,
@@ -91,15 +112,21 @@ def generate_alerts(session) -> dict:
     symbols = {q.mint: q.symbol for q in session.scalars(select(TokenQuote).where(
         TokenQuote.mint.in_(sorted({t.mint for t in fresh}))))}
     webhook = "pending" if Notifier().configured else "off"
-    existing = set(session.scalars(select(Alert.key).where(Alert.key.in_(
-        [f"{t.kind}:{t.wallet}:{t.signature}:{t.event_index}" for t in fresh]))))
+    existing = {a.key: a for a in session.scalars(select(Alert).where(Alert.key.in_(
+        [f"{t.kind}:{t.wallet}:{t.signature}:{t.event_index}" for t in fresh])))}
+    report["finalized"] = 0
 
     created: list[Alert] = []
 
     def add(alert: Alert):
         if alert.key in existing:
+            prior = existing[alert.key]
+            if prior is not None and prior.commitment == "confirmed":
+                # The provisional alert of this trade: completed from the stored, valued trade (not raised again).
+                _finalize(prior, alert.details)
+                report["finalized"] += 1
             return
-        existing.add(alert.key)
+        existing[alert.key] = alert
         alert.delivery_state = webhook
         alert.created_at = now_iso()
         session.add(alert)
@@ -115,10 +142,160 @@ def generate_alerts(session) -> dict:
         if t.kind == "buy":
             convergence = _convergence(session, t, favorites, groups, cfg, symbols.get(t.mint))
             if convergence is not None:
-                existing |= set(session.scalars(select(Alert.key).where(Alert.key == convergence.key)))
+                existing.update({a.key: a for a in session.scalars(select(Alert).where(Alert.key == convergence.key))})
                 add(convergence)
     session.flush()  # alert ids for the prospective quote schedule
     schedule_alert_quotes(session, created)
+    try:
+        session.commit()
+    except IntegrityError:
+        # The stream and the watcher raised the same alert at once; it exists, and the next scan sees it.
+        session.rollback()
+        report["created"] = report["finalized"] = 0
+    return report
+
+
+def _finalize(alert: Alert, details: dict):
+    alert.details = {**details, "detected_by": alert.details.get("detected_by"),
+                     "provisional": {k: alert.details.get(k) for k in ("usd", "quote_amount", "usd_basis")}}
+    alert.commitment, alert.finalized_at = "finalized", now_iso()
+
+
+def _recent_sol_usd(session, prices, now: float) -> Decimal | None:
+    """Latest SOL/USD close from the candle cache (≤ 15 min old), else from the price source."""
+    row = session.scalars(select(PriceCandle).where(PriceCandle.symbol == getattr(prices, "symbol", "SOL-USD"),
+                                                    PriceCandle.minute >= int(now) - 900)
+                          .order_by(PriceCandle.minute.desc()).limit(1)).first()
+    if row is not None:
+        return Decimal(row.close)
+    if prices is None:
+        return None
+    try:
+        candles = prices.minute_candles(int(now) // 60 * 60 - 600, int(now))
+    except ProviderError:
+        return None
+    return max(candles, key=lambda c: c["minute"])["close"] if candles else None
+
+
+def _involved(tx: dict) -> set[str]:
+    keys = tx["transaction"]["message"]["accountKeys"]
+    found = {k["pubkey"] if isinstance(k, dict) else k for k in keys}
+    for field in ("preTokenBalances", "postTokenBalances"):
+        found |= {b["owner"] for b in (tx.get("meta") or {}).get(field) or [] if b.get("owner")}
+    return found
+
+
+def provisional_alerts(session, rpc, signature: str, wallets: list[str] | None = None, *,
+                       detected_at: str | None = None, prices=None, tx: dict | None = None,
+                       detected_by: str = "watcher") -> list[Alert]:
+    """Alerts for watchlist wallets in a `confirmed` transaction, before it is finalized and stored as evidence.
+
+    `wallets`: the watchlist wallets to consider (default: every one the transaction involves). Amounts come from
+    the transaction; USD from the latest SOL/USD candle (`usd_basis`), no market cap. Raises ProviderError while
+    the RPC does not serve the transaction yet at `confirmed`."""
+    cfg = settings()
+    if session.get(RawTransaction, signature) is not None:
+        return []  # already finalized and stored: the regular path alerts
+    query = select(Wallet).where(Wallet.favorite.is_(True))
+    if wallets is not None:
+        query = query.where(Wallet.address.in_(wallets))
+    favorites = {w.address: w for w in session.scalars(query)}
+    if not favorites:
+        return []
+    tx = tx if tx is not None else rpc.confirmed_transaction(signature)
+    if wallets is None:
+        involved = _involved(tx)
+        favorites = {a: w for a, w in favorites.items() if a in involved}
+    now = time.time()
+    block_time = tx.get("blockTime")
+    if (tx.get("meta") or {}).get("err") or tx.get("meta") is None or (
+            block_time is not None and now - block_time > cfg["max_age_minutes"] * 60):
+        return []
+    events = [(w, e) for w in favorites for e in normalize(tx, w) if e["kind"] in ("buy", "sell")]
+    keys = [f"{e['kind']}:{w}:{signature}:{e['event_index']}" for w, e in events]
+    existing = set(session.scalars(select(Alert.key).where(Alert.key.in_(keys)))) if keys else set()
+    todo = [(w, e, k) for (w, e), k in zip(events, keys) if k not in existing]
+    if not todo:
+        return []
+    groups = entity_index(session)
+    symbols = {q.mint: q.symbol for q in session.scalars(select(TokenQuote).where(
+        TokenQuote.mint.in_(sorted({e["mint"] for _, e, _ in todo}))))}
+    rate = _recent_sol_usd(session, prices, now)
+    webhook = "pending" if Notifier().configured else "off"
+    created = []
+    for wallet, e, key in todo:
+        quote = e["quote_amount"]
+        usd, basis = None, None
+        if quote is not None and e["quote_asset"] in ("USDC", "USDT"):
+            usd, basis = quote, "stablecoin_par"
+        elif quote is not None and rate is not None:
+            usd, basis = quote * rate, "latest_sol_usd"
+        entity = groups.get(wallet)
+        details = {"label": favorites[wallet].label, "symbol": symbols.get(e["mint"]),
+                   "token_amount": str(e["token_amount"]), "quote_asset": e["quote_asset"],
+                   "quote_amount": str(quote) if quote is not None else None,
+                   "usd": str(usd) if usd is not None else None, "usd_basis": basis,
+                   "price_usd": str(usd / e["token_amount"]) if usd is not None else None,
+                   "market_cap_usd": None, "market_cap_status": "unknown", "venues": e["venues"],
+                   "trade": e["trade"], "entity": {"id": entity["id"], "size": entity["size"]} if entity else None,
+                   "detected_by": detected_by}
+        alert = Alert(key=key, kind=e["kind"], wallet=wallet, mint=e["mint"], signature=signature,
+                      event_time=block_time, detected_at=detected_at or now_iso(), details=details,
+                      commitment="confirmed", delivery_state=webhook, created_at=now_iso())
+        session.add(alert)
+        created.append(alert)
+    session.flush()
+    schedule_alert_quotes(session, created)
+    try:
+        session.commit()
+    except IntegrityError:
+        session.rollback()  # raised concurrently by the other path
+        return []
+    return created
+
+
+def _age(iso: str, now: float) -> float:
+    return now - datetime.fromisoformat(iso).timestamp()
+
+
+def settle_provisional(session, rpc=None, *, now: float | None = None) -> dict:
+    """Provisional alerts still `confirmed` after a while: completed from the stored trade when it is there;
+    otherwise checked against the cluster: finalized ones are queued for storage, unknown or failed ones dropped."""
+    now = now if now is not None else time.time()
+    report = {"finalized": 0, "queued": 0, "dropped": 0}
+    due = [a for a in session.scalars(select(Alert).where(Alert.commitment == "confirmed"))
+           if _age(a.created_at, now) >= SETTLE_AFTER_SECONDS]
+    if not due:
+        return report
+    groups, favorites = None, {w.address: w for w in session.scalars(select(Wallet))}
+    waiting = []
+    for a in due:
+        trade = session.scalars(select(Trade).where(Trade.wallet == a.wallet, Trade.signature == a.signature,
+                                                    Trade.mint == a.mint, Trade.kind == a.kind)).first()
+        if trade is not None and a.wallet in favorites:
+            groups = groups if groups is not None else entity_index(session)
+            symbol = session.scalar(select(TokenQuote.symbol).where(TokenQuote.mint == a.mint))
+            _finalize(a, _trade_details(trade, favorites[a.wallet], groups, symbol))
+            report["finalized"] += 1
+        else:
+            waiting.append(a)
+    if waiting and rpc is not None and hasattr(rpc, "signature_statuses"):
+        signatures = sorted({a.signature for a in waiting})[:256]
+        try:
+            statuses = dict(zip(signatures, rpc.signature_statuses(signatures)))
+        except ProviderError:
+            statuses = {}
+        for a in waiting:
+            if a.signature not in statuses:
+                continue
+            status = statuses[a.signature]
+            if status is not None and status.get("err") is None and status.get("confirmationStatus") == "finalized":
+                if session.get(PendingSignature, a.signature) is None:
+                    session.add(PendingSignature(signature=a.signature, source="provisional"))
+                    report["queued"] += 1
+            elif (status is not None and status.get("err") is not None) or _age(a.created_at, now) >= DROP_AFTER_SECONDS:
+                a.commitment = "dropped"
+                report["dropped"] += 1
     session.commit()
     return report
 
@@ -158,11 +335,14 @@ def alert_text(a: Alert) -> str:
                 f"{int(d['window_minutes'])} min: {names}. https://solscan.io/token/{a.mint}")
     verb = "compró" if a.kind == "buy" else "vendió"
     who = d.get("label") or f"{a.wallet[:5]}…{a.wallet[-5:]}"
-    amount = f"USD {Decimal(d['usd']):,.2f}" if d.get("usd") else (
+    approx = "≈" if d.get("usd_basis") == "latest_sol_usd" else ""
+    amount = f"{approx}USD {Decimal(d['usd']):,.2f}" if d.get("usd") else (
         f"{d['quote_amount']} {d['quote_asset']}" if d.get("quote_amount") else "importe desconocido")
     cap = f" · MC {'≈' if d.get('market_cap_status') == 'estimated' else ''}USD {Decimal(d['market_cap_usd']):,.0f}" \
         if d.get("market_cap_usd") else ""
-    return f"[{'COMPRA' if a.kind == 'buy' else 'VENTA'}] {who} {verb} {token} por {amount}{cap}. {a.signature and 'https://solscan.io/tx/' + a.signature}"
+    stage = " · confirmada, sin finalizar" if a.commitment == "confirmed" else ""
+    return (f"[{'COMPRA' if a.kind == 'buy' else 'VENTA'}{stage}] {who} {verb} {token} por {amount}{cap}. "
+            f"{a.signature and 'https://solscan.io/tx/' + a.signature}")
 
 
 class Notifier:

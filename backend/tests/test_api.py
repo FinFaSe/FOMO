@@ -44,8 +44,10 @@ class SyntheticRPC:
         self.fetches = []
         self.account_data, self.account_calls = {}, []
         self.histories = {}  # per-address histories (e.g. a bonding curve); others use `history`
+        self.pending = set()  # signatures confirmed but not finalized yet: `transaction` refuses them
+        self.statuses = {}  # signature -> getSignatureStatuses value
 
-    def signatures(self, wallet, before=None, until=None, limit=10):
+    def signatures(self, wallet, before=None, until=None, limit=10, commitment="finalized"):
         items = list(self.histories.get(wallet, self.history))
         if before:
             names = [i["signature"] for i in items]
@@ -60,7 +62,16 @@ class SyntheticRPC:
         self.account_calls.append((tuple(addresses), encoding))
         return [copy.deepcopy(self.account_data.get(a)) for a in addresses]
 
+    def confirmed_transaction(self, signature):
+        payload = self.payload if signature == SIG else self.payloads[signature]
+        return copy.deepcopy(payload)
+
+    def signature_statuses(self, signatures):
+        return [self.statuses.get(s) for s in signatures]
+
     def transaction(self, signature):
+        if signature in self.pending:
+            raise ProviderError("Transacción no disponible en finalized", 409)
         self.fetches.append(signature)
         if signature == SIG:
             return copy.deepcopy(self.payload)
