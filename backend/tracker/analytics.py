@@ -17,7 +17,11 @@ from statistics import mean, median
 from .schemas import Filters
 
 ZERO = Decimal(0)
-VERSION = "wac-wilson-token-v1"
+VERSION = "wac-wilson-token-v2"  # v2: dust remainders close a cycle
+# A cycle closes when what is left after a disposal is at most this fraction of the cycle's peak holding.
+# Wallets often keep a tiny unsellable remainder; without this the position would stay open forever and
+# never count as a win or a loss.
+DUST_FRACTION = Decimal("0.0001")
 
 
 @dataclass
@@ -51,6 +55,10 @@ class Position:
     issues: set = field(default_factory=set)
     entries: list[Decimal | None] = field(default_factory=list)
     fills: list[Fill] = field(default_factory=list)
+    peak: Decimal = ZERO
+    # Remainder written off when the cycle closed as dust, and how much of it was later disposed of.
+    dust_written_off: Decimal = ZERO
+    dust_disposed: Decimal = ZERO
 
     @property
     def pnl(self):
@@ -93,10 +101,19 @@ def reconstruct(fills: list[Fill], as_of: datetime) -> list[Position]:
     for key, slots in slots_by_second.items():
         if len(slots) > 1 and (None in slots.values() or len(set(slots.values())) < len(slots)):
             ambiguous.add(key)
+    # Dust left behind by cycles that closed as dust, per mint. Disposing of it later never opens a cycle.
+    carry: dict[str, Decimal] = defaultdict(lambda: ZERO)
+    last_closed: dict[str, Position] = {}
     for f in sorted((f for f in fills if f.timestamp <= as_of),
                     key=lambda f: (f.timestamp, f.slot if f.slot is not None else -1, f.signature,
                                    f.event_index, f.token)):
         p = current.get(f.token)
+        if p is None and f.kind in ("sell", "transfer_out") and f.quantity <= carry[f.token]:
+            # Selling or moving the dust of a closed cycle: its cost was already written off and its
+            # proceeds are ignored (conservative); it is not a new position.
+            carry[f.token] -= f.quantity
+            last_closed[f.token].dust_disposed += f.quantity
+            continue
         if p is None:
             counts[f.token] += 1
             p = Position(f.token, counts[f.token], f.timestamp)
@@ -111,6 +128,7 @@ def reconstruct(fills: list[Fill], as_of: datetime) -> list[Position]:
             p.issues.add("transfer_unknown_cost_or_disposal")
         if f.kind in ("buy", "transfer_in"):
             p.quantity += f.quantity
+            p.peak = max(p.peak, p.quantity)
             if f.kind == "buy":
                 p.entries.append(f.market_cap_usd)
                 if f.gross_usd is None or f.fees_usd is None:
@@ -119,24 +137,41 @@ def reconstruct(fills: list[Fill], as_of: datetime) -> list[Position]:
                 else:
                     p.basis += f.gross_usd + f.fees_usd
         else:
-            if p.quantity < f.quantity:
+            quantity, share = f.quantity, Decimal(1)
+            excess = f.quantity - p.quantity
+            if ZERO < excess <= carry[f.token]:
+                # The disposal also includes dust carried from an earlier cycle: only this position's
+                # share of the proceeds belongs to it.
+                carry[f.token] -= excess
+                last_closed[f.token].dust_disposed += excess
+                quantity, share = p.quantity, p.quantity / f.quantity
+            if p.quantity < quantity:
                 p.issues.add("missing_opening_inventory")
                 p.money_known = False
                 # Preserve oversells as an invalid position; never fabricate an opening lot.
                 p.quantity = ZERO
             else:
-                allocated = p.basis * f.quantity / p.quantity
+                allocated = p.basis * quantity / p.quantity
                 p.basis -= allocated
-                p.quantity -= f.quantity
+                p.quantity -= quantity
                 if f.kind == "sell":
                     p.allocated_cost += allocated
                     if f.gross_usd is None or f.fees_usd is None:
                         p.money_known = False
                         p.issues.add("missing_historical_usd_or_fees")
                     else:
-                        p.proceeds += f.gross_usd - f.fees_usd
+                        p.proceeds += (f.gross_usd - f.fees_usd) * share
+            if ZERO < p.quantity <= p.peak * DUST_FRACTION:
+                # Dust: close the cycle and write the remainder off at zero value.
+                p.dust_written_off = p.quantity
+                if p.money_known:
+                    p.allocated_cost += p.basis
+                p.basis = ZERO
+                carry[f.token] += p.quantity
+                p.quantity = ZERO
             if p.quantity == 0:
                 p.closed_at = f.timestamp
+                last_closed[f.token] = p
                 del current[f.token]
     return output
 
@@ -166,6 +201,8 @@ def position_json(p: Position, threshold: Decimal) -> dict:
         "realized_proceeds_usd": num(p.proceeds) if p.money_known else None,
         "realized_pnl_usd": num(p.pnl), "realized_roi_pct": num(p.roi),
         "unrealized_pnl_usd": None, "entry_market_caps_usd": [num(x) for x in p.entries],
+        "peak_quantity": str(p.peak), "dust_written_off_quantity": str(p.dust_written_off),
+        "dust_disposed_quantity": str(p.dust_disposed),
         "evaluable": p.evaluable, "verified": p.verified, "market_cap_verified": p.cap_verified,
         "early_entry_reported": bool(p.entries) and all(c is not None and c <= threshold for c in p.entries),
         "issues": sorted(p.issues),

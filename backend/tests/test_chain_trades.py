@@ -120,3 +120,16 @@ def test_sell_without_known_entry_is_not_evaluable(client):  # noqa: F811
     c.post(SYNC, json={})
     [p] = c.get(f"/api/wallets/{WALLET}/chain-positions").json()["positions"]
     assert not p["evaluable"] and "missing_opening_inventory" in p["issues"]
+
+
+def test_dust_left_after_a_sell_closes_the_position_everywhere(client):  # noqa: F811
+    c, rpc = client
+    now = int(time.time())
+    # Buys 3,500,000 tokens and sells 3,499,999.9: 0.1 token of dust stays in the wallet.
+    serve(rpc, [pump_buy(block_time=now - 7200), pump_sell(tokens=3_499_999_900_000, block_time=now - 3600)])
+    c.post(SYNC, json={})
+    [p] = c.get(f"/api/wallets/{WALLET}/analysis").json()["positions"]
+    assert p["status"] == "closed" and p["evaluable"] and p["dust_written_off_quantity"] == "0.1"
+    [sol] = c.get(f"/api/wallets/{WALLET}/chain-positions").json()["positions"]
+    assert sol["status"] == "closed" and sol["evaluable"]
+    assert c.get(f"/api/wallets/{WALLET}/open-positions").json()["positions"] == []

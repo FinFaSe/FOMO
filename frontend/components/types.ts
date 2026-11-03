@@ -20,7 +20,7 @@ export type Fill = {
 export type Position = {
   token: string; cycle: number; opened_at: string; closed_at: string | null;
   status: string; remaining_quantity: string; realized_roi_pct: string | null;
-  realized_pnl_usd: string | null; evaluable: boolean; verified: boolean;
+  realized_pnl_usd: string | null; evaluable: boolean; verified: boolean; dust_written_off_quantity?: string;
   issues: string[]; fills: Fill[];
 };
 export type Analysis = {

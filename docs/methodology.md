@@ -2,7 +2,11 @@
 
 ## Contabilidad
 
-Una posición es un ciclo wallet/mint desde balance cero hasta volver a cero. Recomprar tras cerrar abre otro ciclo.
+Una posición es un ciclo wallet/mint desde balance cero hasta volver a cero, o a **polvo**: si tras una venta o salida
+queda como máximo el 0,01% de la mayor cantidad tenida en el ciclo, el ciclo se cierra y ese resto se da de baja a
+valor cero (su costo remanente se suma al costo asignado, así que el PnL no mejora). Vender o mover después ese polvo
+no abre un ciclo ni cuenta como inventario faltante, y su importe se ignora; si una venta de un ciclo nuevo incluye
+el polvo anterior, solo la parte proporcional del cobro pertenece al ciclo nuevo. Recomprar tras cerrar abre otro ciclo.
 Se reconstruye **todo** el ledger disponible anterior al snapshot, incluso compras anteriores a la ventana, para no
 perder el costo inicial. Se incluyen en la métrica de 90 días los ciclos cuyo cierre cae en `[as_of − 90 días, as_of]`.
 Posiciones abiertas se muestran aparte; su PnL parcial realizado no cuenta como un win ni se mezcla en el ranking.

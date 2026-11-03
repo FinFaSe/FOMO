@@ -196,3 +196,49 @@ def test_token_aggregation_is_conservative_for_repeated_cycles(fill):
     m = analyze(WALLET, events, Filters(), AS_OF)["metrics"]
     assert m["win_rate"] == 0.5
     assert m["token_cluster_win_rate"] == 0
+
+
+def test_dust_remainder_closes_the_cycle_and_writes_off_its_cost(fill):
+    # 50 of 1,000,000 tokens left (0.005%): the wallet is out of the trade.
+    events = [fill("buy", 1_000_000, 100), fill("sell", 999_950, 300)]
+    [p] = reconstruct(events, AS_OF)
+    assert p.closed_at is not None and p.quantity == 0 and p.dust_written_off == 50
+    # The whole cost counts (the dust is valued at zero), so the PnL is not flattered.
+    assert p.allocated_cost == 100 and p.pnl == 200 and p.evaluable
+    r = analyze(WALLET, events, Filters(), AS_OF)
+    assert r["metrics"]["evaluable_positions"] == 1 and r["metrics"]["open_positions"] == 0
+    assert r["positions"][0]["dust_written_off_quantity"] == "50"
+    assert r["method_version"] == "wac-wilson-token-v2"
+
+
+def test_dust_threshold_is_inclusive_and_relative_to_the_peak(fill):
+    exact = reconstruct([fill("buy", 1_000_000, 100), fill("sell", 999_900, 300)], AS_OF)  # 0.01%
+    assert exact[0].closed_at is not None and exact[0].dust_written_off == 100
+    above = reconstruct([fill("buy", 1_000_000, 100), fill("sell", 999_000, 300)], AS_OF)  # 0.1%
+    assert above[0].closed_at is None and above[0].quantity == 1000 and above[0].dust_written_off == 0
+    # The peak, not the last buy, sets the threshold.
+    staged = reconstruct([fill("buy", 600_000, 60), fill("buy", 400_000, 40), fill("sell", 999_950, 300)], AS_OF)
+    assert staged[0].closed_at is not None and staged[0].peak == 1_000_000
+
+
+def test_later_dust_disposal_does_not_open_a_cycle(fill):
+    events = [fill("buy", 1_000_000, 100), fill("sell", 999_950, 300), fill("sell", 50, "0.01")]
+    [p] = reconstruct(events, AS_OF)
+    assert p.dust_disposed == 50 and not p.issues and p.pnl == 200  # dust proceeds ignored
+    moved = reconstruct(events[:2] + [fill("transfer_out", 50, None)], AS_OF)
+    assert len(moved) == 1 and not moved[0].issues
+
+
+def test_full_exit_of_a_new_cycle_can_include_old_dust(fill):
+    events = [fill("buy", 1_000_000, 100), fill("sell", 999_950, 300),
+              fill("buy", 1000, 10), fill("sell", 1050, 105)]  # sells the new 1000 plus the old 50
+    first, second = reconstruct(events, AS_OF)
+    assert second.closed_at is not None and not second.issues
+    assert second.allocated_cost == 10 and second.proceeds == 100  # 105 × 1000/1050
+    assert first.dust_disposed == 50
+
+
+def test_disposal_beyond_the_carried_dust_is_still_missing_inventory(fill):
+    events = [fill("buy", 1_000_000, 100), fill("sell", 999_950, 300), fill("sell", 100, 1)]
+    first, second = reconstruct(events, AS_OF)
+    assert "missing_opening_inventory" in second.issues and first.dust_disposed == 0

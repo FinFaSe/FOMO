@@ -45,7 +45,7 @@ Los procesos de desarrollo deben reiniciarse en nuevas máquinas: no se asume qu
 | Capitalización máxima de **todas** las compras del ciclo | USD 250.000, inclusive |
 | Gran ganador, ROI **neto realizado** | ≥ +500% = 6× del capital |
 | Win rate histórico | ≥ 60% observado **y** límite inferior Wilson 95% ≥ 60% |
-| Posiciones cerradas evaluables | ≥ 30 |
+| Posiciones cerradas evaluables | ≥ 30 (un resto ≤ 0,01% del máximo del ciclo cuenta como cerrado, con ese polvo a valor cero) |
 | Ventana de cierres | Últimos 90 días |
 | Evidencia | Swaps, USD, fees, market cap histórico e historial completo verificados |
 
