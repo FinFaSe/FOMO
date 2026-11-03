@@ -28,6 +28,9 @@ La verificación independiente no se delega en frases de marketing del proveedor
 - Next.js + TypeScript + Tailwind: dashboard y proxy servidor; ninguna clave del proveedor va al navegador.
 - FastAPI + Pydantic: contratos estrictos, límites de entrada, RPC y análisis determinista con `Decimal`.
 - SQLAlchemy: SQLite para arranque inmediato; PostgreSQL en Compose para persistencia extensible.
+- Esquema versionado con Alembic (noviembre de 2026; antes `create_all`): `0001` reproduce el esquema importado,
+  `0002` añade las tablas del tracker (tolerante a bases de desarrollo intermedias), `0003` pasa a 64 bits los slots
+  y tiempos de `raw_transactions` (en PostgreSQL `Integer` es de 32 bits). Probado en SQLite y en PostgreSQL 16.
 - Tablas de wallets, capturas RPC inmutables, observaciones, eventos declarados, snapshots y capturas privadas de fuente.
 - Adaptadores separados para Solana y FOMO API; otras redes requieren su propio normalizador, no reutilizar
   contabilidad de balances nativos Solana sin adaptar sus reglas.

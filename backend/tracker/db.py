@@ -4,6 +4,7 @@ from pathlib import Path
 
 from sqlalchemy import (
     JSON,
+    BigInteger,
     Boolean,
     ForeignKey,
     Integer,
@@ -47,9 +48,9 @@ class SyncState(Base):
     wallet: Mapped[str] = mapped_column(ForeignKey("wallets.address"), primary_key=True)
     head_signature: Mapped[str | None] = mapped_column(String(88), nullable=True)
     tail_signature: Mapped[str | None] = mapped_column(String(88), nullable=True)
-    tail_block_time: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    tail_block_time: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # Every signature with block_time >= covered_from has been processed (between head and tail).
-    covered_from: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    covered_from: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     history_start_reached: Mapped[bool] = mapped_column(Boolean, default=False)
     catchup_before: Mapped[str | None] = mapped_column(String(88), nullable=True)
     catchup_head: Mapped[str | None] = mapped_column(String(88), nullable=True)
@@ -66,8 +67,8 @@ class SyncState(Base):
 class RawTransaction(Base):
     __tablename__ = "raw_transactions"
     signature: Mapped[str] = mapped_column(String(88), primary_key=True)
-    slot: Mapped[int] = mapped_column(Integer)
-    block_time: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    slot: Mapped[int] = mapped_column(BigInteger)
+    block_time: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
     payload: Mapped[dict] = mapped_column(JSON)
     digest: Mapped[str] = mapped_column(String(64))
     source: Mapped[str] = mapped_column(String(200))
@@ -108,8 +109,8 @@ class Trade(Base):
     event_index: Mapped[int] = mapped_column(Integer)
     mint: Mapped[str] = mapped_column(String(44), index=True)
     kind: Mapped[str] = mapped_column(String(20))
-    slot: Mapped[int] = mapped_column(Integer)
-    block_time: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    slot: Mapped[int] = mapped_column(BigInteger)
+    block_time: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
     # Decimal amounts are stored as strings to keep exact values across SQLite and PostgreSQL.
     details: Mapped[dict] = mapped_column(JSON)
     normalizer: Mapped[str] = mapped_column(String(40))
@@ -121,7 +122,7 @@ class PriceCandle(Base):
     __tablename__ = "price_candles"
     source: Mapped[str] = mapped_column(String(200), primary_key=True)
     symbol: Mapped[str] = mapped_column(String(20), primary_key=True)
-    minute: Mapped[int] = mapped_column(Integer, primary_key=True)
+    minute: Mapped[int] = mapped_column(BigInteger, primary_key=True)
     open: Mapped[str] = mapped_column(String(40))
     high: Mapped[str] = mapped_column(String(40))
     low: Mapped[str] = mapped_column(String(40))
@@ -214,8 +215,8 @@ class DiscoverySeed(Base):
     reached_start: Mapped[bool] = mapped_column(Boolean, default=False)
     oldest: Mapped[list | None] = mapped_column(JSON, nullable=True)  # oldest signatures seen, newest first
     launch_signature: Mapped[str | None] = mapped_column(String(88), nullable=True)
-    launch_slot: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    launch_time: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    launch_slot: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    launch_time: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     creator: Mapped[str | None] = mapped_column(String(44), nullable=True)
     outcome: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     declared_peak_cap_usd: Mapped[str | None] = mapped_column(String(40), nullable=True)
@@ -237,8 +238,8 @@ class EarlyBuy(Base):
     wallet: Mapped[str] = mapped_column(String(44), index=True)
     signature: Mapped[str] = mapped_column(String(88))
     event_index: Mapped[int] = mapped_column(Integer)
-    slot: Mapped[int] = mapped_column(Integer)
-    block_time: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    slot: Mapped[int] = mapped_column(BigInteger)
+    block_time: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     rank: Mapped[int] = mapped_column(Integer)  # 1 = first buyer after launch (ties share a slot)
     details: Mapped[dict] = mapped_column(JSON)
 
@@ -254,7 +255,7 @@ class WalletFunding(Base):
     # wallet | high_volume (exchange, router or bot: funds too many unrelated wallets to link them)
     funder_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)
     signature: Mapped[str | None] = mapped_column(String(88), nullable=True)
-    block_time: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    block_time: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     lamports: Mapped[str | None] = mapped_column(String(40), nullable=True)
     reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
     requested_by: Mapped[str] = mapped_column(String(20), default="manual")
@@ -274,7 +275,7 @@ class Alert(Base):
     wallet: Mapped[str | None] = mapped_column(String(44), nullable=True, index=True)
     mint: Mapped[str] = mapped_column(String(44), index=True)
     signature: Mapped[str | None] = mapped_column(String(88), nullable=True)
-    event_time: Mapped[int | None] = mapped_column(Integer, nullable=True)  # block time of the trade
+    event_time: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # block time of the trade
     detected_at: Mapped[str | None] = mapped_column(String(40), nullable=True)  # transaction downloaded
     created_at: Mapped[str] = mapped_column(String(40), default=now_iso, index=True)
     details: Mapped[dict] = mapped_column(JSON)
@@ -322,11 +323,14 @@ class SourceCapture(Base):
     payload: Mapped[str] = mapped_column(Text)
 
 
-def database(url: str | None = None):
-    url = url or os.getenv("DATABASE_URL", "sqlite:///./.data/tracker.db")
+def resolve_url(url: str | None = None) -> str:
+    return url or os.getenv("DATABASE_URL", "sqlite:///./.data/tracker.db")
+
+
+def make_engine(url: str | None = None):
+    url = resolve_url(url)
     if url.startswith("sqlite"):
         Path(".data").mkdir(exist_ok=True)
-    if url.startswith("sqlite"):
         # The API and the background worker are separate processes: wait for locks instead of failing,
         # and use WAL so readers are not blocked by the writer.
         engine = create_engine(url, connect_args={"check_same_thread": False, "timeout": 30})
@@ -337,7 +341,14 @@ def database(url: str | None = None):
             cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA busy_timeout=30000")
             cursor.close()
-    else:
-        engine = create_engine(url, pool_pre_ping=True)
-    Base.metadata.create_all(engine)
+        return engine
+    return create_engine(url, pool_pre_ping=True)
+
+
+def database(url: str | None = None):
+    """Engine and session factory with the schema at the latest Alembic revision (see tracker.migrate)."""
+    from .migrate import ensure_schema
+
+    engine = make_engine(url)
+    ensure_schema(engine)
     return engine, sessionmaker(engine, expire_on_commit=False)

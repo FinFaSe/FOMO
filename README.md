@@ -35,6 +35,31 @@ npm run dev
 
 El frontend escucha en el puerto 3000 y comunica con FastAPI mediante su proxy de servidor.
 Los datos locales se guardan en `backend/.data/tracker.db` (SQLite, ignorado en Git).
+
+### Migraciones de base de datos
+
+El esquema se gestiona con **Alembic** (`backend/tracker/migrations`). La API y el worker actualizan la base a la
+última revisión al arrancar, bajo un bloqueo entre procesos (advisory lock en PostgreSQL, archivo de bloqueo junto
+al SQLite), así que no migran a la vez. Una base creada antes de Alembic (por el código importado o por versiones
+intermedias) se marca en la revisión base y se actualiza **conservando sus datos**.
+
+```bash
+cd backend
+uv run python -m tracker.migrate current   # revisión actual y la esperada
+uv run python -m tracker.migrate upgrade   # actualizar a mano (también dentro del contenedor)
+```
+
+Con `TRACKER_AUTO_MIGRATE=0` la app no migra sola y se niega a arrancar si la base no está al día (útil cuando las
+migraciones se ejecutan como paso de despliegue). Haz copia de seguridad antes de migrar datos que te importen.
+
+Para cambiar el esquema: modifica los modelos en `tracker/db.py` y genera una revisión nueva, revísala y súbela
+junto al cambio. `tests/test_migrations.py` falla si los modelos y las migraciones no coinciden.
+
+```bash
+cd backend
+uv run alembic revision --autogenerate -m "describe el cambio"
+uv run alembic check   # sin cambios pendientes
+```
 La API OpenAPI está en el puerto 8000, ruta `/docs`. `GET /api/health` comprueba la base de datos.
 Los procesos de desarrollo deben reiniciarse en nuevas máquinas: no se asume que sobrevivan a un snapshot.
 
@@ -208,6 +233,7 @@ Variables opcionales:
 | `BACKEND_URL` | En Next, por defecto `http://127.0.0.1:8000` |
 | `TRACKER_ACCESS_TOKEN` | Opcional: protege la API; Next lo adjunta del lado servidor |
 | `CORS_ORIGINS` | Orígenes locales permitidos, separados por comas |
+| `TRACKER_AUTO_MIGRATE` | `0`: no migrar al arrancar; solo comprobar que la base está al día |
 | `TRACKER_REFRESH_MINUTES` | Worker: intervalo de resincronización de la watchlist (30; 0 desactiva) |
 | `TRACKER_EMBEDDED_WORKER` | `1` ejecuta el worker como hilo de la API (solo uso local) |
 | `TRACKER_WATCH_SECONDS` | Vigilante de la watchlist: intervalo en segundos (20; 0 desactiva) |
