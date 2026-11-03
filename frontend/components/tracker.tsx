@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import type { Analysis, ChainPositions, ChainTrade, Config, Filters, Job, Observation, OpenPositions, Wallet, WorkerStatus } from "./types";
+import type { Analysis, Candidate, ChainPositions, ChainTrade, Config, Filters, Job, Observation, OpenPositions, Seed, Wallet, WorkerStatus } from "./types";
 
 const initial: Filters = { max_entry_market_cap_usd: "250000", min_realized_roi_pct: "500",
   min_win_rate: 0.6, min_evaluable_positions: 30, analysis_days: 90, conservative_win_rate: true };
@@ -16,6 +16,9 @@ const riskNames: Record<string, string> = { freeze_authority_active: "Puede cong
 const ago = (s: string | null) => { if (!s) return "—"; const m = Math.round((Date.now() - new Date(s).getTime()) / 60000); return m < 1 ? "ahora" : m < 60 ? `hace ${m} min` : `hace ${Math.round(m / 60)} h`; };
 const jobStates: Record<string, string> = { queued: "En cola", running: "Sincronizando", cancel_requested: "Cancelando…",
   done: "Completado", failed: "Falló", cancelled: "Cancelado" };
+const seedStates: Record<string, string> = { queued: "En cola", scanning: "Escaneando", done: "Escaneada", failed: "Falló" };
+const flagNames: Record<string, string> = { creator: "Creador", launch_tx: "Compra en la creación", launch_slot: "Mismo bloque del lanzamiento" };
+const basisNames: Record<string, string> = { scanned_trades: "operaciones escaneadas", current_quote: "cotización actual", declared: "declarado" };
 const kinds: Record<string, string> = { buy: "Compra", sell: "Venta", transfer_in: "Entrada", transfer_out: "Salida" };
 const pct = (n: number | null | undefined) => n == null ? "Sin datos" : `${(n * 100).toFixed(1)}%`;
 const date = (s: string) => new Intl.DateTimeFormat("es-PE", { dateStyle: "medium", timeStyle: "short", timeZone: "America/Lima" }).format(new Date(s));
@@ -96,6 +99,13 @@ export default function Tracker() {
   const [label, setLabel] = useState("");
   const [handle, setHandle] = useState("");
   const [seed, setSeed] = useState("");
+  const [seedLabel, setSeedLabel] = useState("");
+  const [seedPeak, setSeedPeak] = useState("");
+  const [seedPeakSource, setSeedPeakSource] = useState("");
+  const [seeds, setSeeds] = useState<Seed[]>([]);
+  const [candidateList, setCandidateList] = useState<{ items: Candidate[]; total: number; seeds: number } | null>(null);
+  const [discoveryOptions, setDiscoveryOptions] = useState({ multiple: 10, min_seeds: 1, include_flagged: false });
+  const [discoveryVersion, setDiscoveryVersion] = useState(0);
   const [expanded, setExpanded] = useState("");
   const wallet = wallets.find(w => w.address === selected);
   const activeJob = jobs.find(j => ACTIVE_JOB.includes(j.state));
@@ -167,6 +177,43 @@ export default function Tracker() {
     return () => { active = false; if (timer) clearTimeout(timer); };
   }, [selected, jobsVersion, reloadWallets]);
 
+  // Discovery tab: seeds (polled while a scan is pending) and cross-seed candidates.
+  useEffect(() => {
+    if (tab !== "discovery") return;
+    let active = true; let timer: ReturnType<typeof setTimeout> | undefined;
+    async function load() {
+      try {
+        const q = new URLSearchParams({ multiple: String(discoveryOptions.multiple), min_seeds: String(discoveryOptions.min_seeds),
+          include_flagged: String(discoveryOptions.include_flagged) });
+        const [sd, cd] = await Promise.all([api<{ items: Seed[] }>("/discovery/seeds"),
+          api<{ items: Candidate[]; total: number; seeds: number }>(`/discovery/candidates?${q}`)]);
+        if (!active) return;
+        setSeeds(sd.items); setCandidateList(cd);
+        if (sd.items.some(x => x.state === "queued" || x.state === "scanning")) timer = setTimeout(load, 4000);
+      } catch (e) { if (active) setError(e instanceof Error ? e.message : "Error inesperado"); }
+    }
+    load();
+    return () => { active = false; if (timer) clearTimeout(timer); };
+  }, [tab, discoveryOptions, discoveryVersion]);
+
+  async function addSeed(e: React.FormEvent) {
+    e.preventDefault();
+    await action("seed", async () => {
+      const body: Record<string, string> = { mint: seed.trim(), label: seedLabel.trim() };
+      if (seedPeak) { body.peak_market_cap_usd = seedPeak; if (seedPeakSource) body.peak_source_url = seedPeakSource.trim(); }
+      const r = await api<{ created: boolean }>("/discovery/seeds", post(body));
+      setSeed(""); setSeedLabel(""); setSeedPeak(""); setSeedPeakSource(""); setDiscoveryVersion(v => v + 1);
+      setNotice(r.created ? "Semilla en cola: el worker escaneará sus primeras operaciones." : "Semilla actualizada y en cola para volver a escanear.");
+    });
+  }
+  async function study(wallet: string) {
+    await action("study", async () => {
+      await api(`/discovery/candidates/${wallet}/study`, post({}));
+      await reloadWallets(); setDiscoveryVersion(v => v + 1);
+      setNotice("Wallet añadida al estudio y sincronización en cola. El ranking dirá si su historial completo lo confirma.");
+    });
+  }
+
   async function action(name: string, task: () => Promise<void>) {
     setBusy(name); setError(""); setNotice("");
     try { await task(); } catch (e) { setError(e instanceof Error ? e.message : "Error inesperado"); }
@@ -207,7 +254,8 @@ export default function Tracker() {
     });
   }
   const tabs = [{id: "overview", name: "Explorador", icon: "◈"}, {id: "rankings", name: "Ranking validado", icon: "↗"},
-    {id: "watchlist", name: "Watchlist", icon: "☆"}, {id: "sources", name: "Fuentes y método", icon: "◎"}];
+    {id: "discovery", name: "Descubrimiento", icon: "⌕"}, {id: "watchlist", name: "Watchlist", icon: "☆"},
+    {id: "sources", name: "Fuentes y método", icon: "◎"}];
 
   return <div className="shell">
     <aside className="sidebar">
@@ -392,6 +440,46 @@ export default function Tracker() {
           </section>}
         </>}
 
+        {tab === "discovery" && <>
+          <section className="panel"><div className="section-heading"><h2>Tokens semilla</h2><span className="badge">{seeds.length} SEMILLAS</span></div>
+            <p className="muted">Se escanean las primeras operaciones de cada token (desde su creación) para ver quién compró antes. Incluye también tokens que fracasaron: si solo añades ganadores, la tasa de aciertos queda inflada.</p>
+            <form className="inline-form" onSubmit={addSeed}>
+              <label>Mint del token<input required placeholder="Contrato público del token" value={seed} onChange={e => setSeed(e.target.value)}/></label>
+              <label>Etiqueta<input maxLength={80} placeholder="Opcional" value={seedLabel} onChange={e => setSeedLabel(e.target.value)}/></label>
+              <label>Pico de market cap declarado (USD)<input type="number" min="0" placeholder="Opcional" value={seedPeak} onChange={e => setSeedPeak(e.target.value)}/></label>
+              <label>Fuente del pico<input type="url" placeholder="https://… (opcional)" value={seedPeakSource} onChange={e => setSeedPeakSource(e.target.value)}/></label>
+              <button className="secondary" disabled={!!busy}>{busy === "seed" ? "Añadiendo…" : "+ Añadir semilla"}</button></form>
+            {seeds.some(x => x.state === "queued") && worker && !worker.alive && <p className="risk">No hay ningún worker activo: las semillas esperan en cola. Inicia <code>uv run python -m tracker.worker</code> en <code>backend/</code>.</p>}
+            {!seeds.length ? <div className="small-empty">Todavía no hay semillas. Añade tokens que se multiplicaron y también algunos que fracasaron.</div> :
+              <div className="table-wrap"><table><thead><tr><th>Token</th><th>Estado</th><th>Lanzamiento · Lima</th><th>Compradores tempranos</th><th>Market cap inicial</th><th>Pico (mínimo)</th><th>Múltiplo</th></tr></thead><tbody>{seeds.map(x => <tr key={x.mint}>
+                <td><a href={`https://solscan.io/token/${x.mint}`} target="_blank" rel="noreferrer"><code>{x.label || short(x.mint)} ↗</code></a></td>
+                <td><span className="badge">{seedStates[x.state] || x.state}</span>{x.error && <small className="risk"> {x.error}</small>}</td>
+                <td>{x.launch_time ? date(x.launch_time) : "—"}</td>
+                <td className="mono">{x.outcome?.early_buyers ?? "—"}</td>
+                <td className="mono">{money(x.outcome?.launch_cap_usd)}</td>
+                <td className="mono">{money(x.outcome?.peak_cap_lower_bound_usd)}{x.outcome?.peak_basis && <small> · {basisNames[x.outcome.peak_basis] || x.outcome.peak_basis}</small>}</td>
+                <td className="mono">{x.outcome?.peak_multiple_from_launch ? `${Number(x.outcome.peak_multiple_from_launch).toFixed(1)}×` : "—"}</td></tr>)}</tbody></table></div>}
+          </section>
+          <section className="panel transactions"><div className="section-heading"><h2>Candidatos</h2><span className="badge">{candidateList?.total ?? 0} WALLETS</span></div>
+            <p className="muted">Wallets que compraron entre los primeros en las semillas escaneadas. Un acierto es una semilla cuyo pico (límite inferior) llegó al múltiplo elegido desde la entrada de esa wallet. Son candidatas, no traders validados: «Estudiar» la sincroniza para medirla con el ranking.</p>
+            <div className="inline-form">
+              <label>Múltiplo para contar acierto<select value={discoveryOptions.multiple} onChange={e => setDiscoveryOptions({ ...discoveryOptions, multiple: Number(e.target.value) })}>{[3, 5, 10, 20, 50].map(n => <option key={n} value={n}>{n}×</option>)}</select></label>
+              <label>Semillas mínimas<select value={discoveryOptions.min_seeds} onChange={e => setDiscoveryOptions({ ...discoveryOptions, min_seeds: Number(e.target.value) })}>{[1, 2, 3, 5].map(n => <option key={n} value={n}>{n}</option>)}</select></label>
+              <label className="checkbox"><input type="checkbox" checked={discoveryOptions.include_flagged} onChange={e => setDiscoveryOptions({ ...discoveryOptions, include_flagged: e.target.checked })}/> Incluir creadores y compras en el bloque del lanzamiento</label>
+            </div>
+            {!candidateList?.items.length ? <div className="small-empty">{candidateList?.seeds ? "Ninguna wallet cumple los filtros." : "Escanea al menos una semilla para ver candidatos."}</div> :
+              <div className="table-wrap"><table><thead><tr><th>Wallet</th><th>Semillas</th><th>Aciertos / fallos</th><th>Wilson 95%</th><th>Minutos tras lanzamiento</th><th>Rango mediano</th><th>Marcas</th><th></th></tr></thead><tbody>{candidateList.items.map(x => <tr key={x.wallet}>
+                <td><a href={`https://solscan.io/account/${x.wallet}`} target="_blank" rel="noreferrer"><code>{short(x.wallet)} ↗</code></a></td>
+                <td className="mono">{x.seeds}</td>
+                <td className="mono">{x.hits} / {x.misses}{x.unknown ? <small> · {x.unknown} sin dato</small> : null}{x.declared_peak_hits ? <small className="risk"> · {x.declared_peak_hits} con pico declarado</small> : null}</td>
+                <td className="mono">{pct(x.hit_rate_ci95[0])} – {pct(x.hit_rate_ci95[1])}</td>
+                <td className="mono">{x.median_minutes_after_launch == null ? "—" : x.median_minutes_after_launch.toFixed(1)}</td>
+                <td className="mono">{x.median_rank}</td>
+                <td>{x.flags.length ? <small className="risk">{x.flags.map(f => flagNames[f] || f).join(" · ")}</small> : <small>—</small>}</td>
+                <td>{x.tracked ? <button className="quiet" onClick={() => { setSelected(x.wallet); setTab("overview"); }}>Ver perfil →</button> : <button className="secondary" disabled={!!busy} onClick={() => study(x.wallet)}>Estudiar</button>}</td></tr>)}</tbody></table></div>}
+          </section>
+        </>}
+
         {tab === "rankings" && <section className="panel"><div className="section-heading"><h2>Ranking de evidencia validada</h2><span className="badge">{rankings.length} RESULTADOS</span></div>
           <p className="muted">No utiliza el PnL reportado por FOMO para clasificar. Se exige historial normalizado completo y prueba de costos, ventas y capitalización de entrada.</p>
           {!rankings.length ? <div className="empty"><div className="empty-icon">↗</div><h2>Aún no hay traders que superen la verificación.</h2><p>Una clasificación vacía es el resultado correcto cuando falta evidencia. Descubre candidatos y examina su historial desde el explorador.</p><button className="secondary" onClick={() => setTab("overview")}>Investigar wallets →</button></div> : rankings.map(r => <button className="ranking-row" key={r.address} onClick={() => {setSelected(r.address); setTab("overview");}}>{r.label || short(r.address)}<span>{pct(r.metrics.win_rate)} · {r.metrics.evaluable_positions} posiciones</span></button>)}
@@ -404,9 +492,8 @@ export default function Tracker() {
           <article className="source-card"><span className="source-icon">f.</span><div><h3>FOMO API · proveedor independiente</h3><span className="badge warning">{config?.fomo_api_configured ? "Clave configurada" : "Requiere FOMO_API_KEY"}</span><p>Permite resolver usuarios a wallets. Su asociación es declarada y su historial de posiciones es incompleto. No implica integración oficial con fomo.family.</p><a href="https://fomoapi.io/docs" target="_blank" rel="noreferrer">Documentación ↗</a><span> · </span><a href="https://fomoapi.io/terms" target="_blank" rel="noreferrer">Condiciones ↗</a>
             <form className="inline-form" onSubmit={e => {e.preventDefault(); action("resolve", async () => {const w = await api<Wallet>("/integrations/fomo/resolve",post({handle})); await reloadWallets(); setSelected(w.address); setTab("overview"); setNotice("Asociación de identidad declarada por el proveedor, pendiente de verificación independiente."); });}}>
               <label>Usuario de FOMO<input placeholder="@usuario" value={handle} required onChange={e => setHandle(e.target.value)}/></label><button className="secondary" disabled={!!busy || !config?.fomo_api_configured}>Resolver usuario</button></form></div></article>
-          <article className="source-card"><span className="source-icon">⌕</span><div><h3>Descubrimiento por semilla</h3><p>Consulta hasta tres transacciones de un mint y añade sus firmantes como candidatos sin validar. Incluye tokens fallidos y wallets manuales en tu investigación; esta muestra no demuestra habilidad ni cobertura completa.</p>
-            <form className="inline-form" onSubmit={e => {e.preventDefault(); action("discover", async () => {const r = await api<{candidates:string[]}>("/discovery",post({token:seed,limit:3})); await reloadWallets(); setNotice(`${r.candidates.length} candidatos añadidos. No son ganadores verificados.`); });}}>
-              <label>Mint Solana<input required placeholder="Contrato público del token" value={seed} onChange={e => setSeed(e.target.value)}/></label><button className="secondary" disabled={!!busy}>Buscar candidatos</button></form></div></article>
+          <article className="source-card"><span className="source-icon">⌕</span><div><h3>Descubrimiento hacia atrás</h3><p>Para cada token semilla se escanea su bonding curve de pump.fun (o el pool que indiques) hasta la creación y se registran los primeros compradores con su market cap de entrada. Las wallets que entran temprano en varias semillas que luego se multiplicaron son candidatas a estudiar. Está en la pestaña «Descubrimiento».</p>
+            <button className="secondary" onClick={() => setTab("discovery")}>Ir a Descubrimiento →</button></div></article>
         </section><section className="panel methodology"><h2>Cómo se evalúa</h2><ol><li><strong>Reconstrucción cronológica</strong><p>Costo promedio ponderado. Fees de compra se incorporan al costo; fees de venta se restan de lo recuperado.</p></li>
           <li><strong>Solo beneficios realizados</strong><p>Las ventas parciales mantienen el costo remanente. Una posición cuenta al cerrar el ciclo completo. Las recompras abren nuevos ciclos.</p></li>
           <li><strong>Confianza según muestra</strong><p>Wilson al 95% sobre resultados agregados por token. Recomprar el mismo mint no crea nuevas observaciones independientes. Puede persistir correlación entre tokens.</p></li>

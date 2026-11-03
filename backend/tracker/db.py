@@ -196,6 +196,51 @@ class TokenQuote(Base):
     fetched_at: Mapped[str] = mapped_column(String(40), default=now_iso)
 
 
+class DiscoverySeed(Base):
+    """A token whose earliest buyers are scanned (backward discovery). Winners and failures alike."""
+
+    __tablename__ = "discovery_seeds"
+    mint: Mapped[str] = mapped_column(String(44), primary_key=True)
+    label: Mapped[str] = mapped_column(String(80), default="")
+    scan_address: Mapped[str] = mapped_column(String(44))
+    address_kind: Mapped[str] = mapped_column(String(30))  # pump_bonding_curve | pool
+    # queued → scanning → done | failed; a scan that ran out of page budget goes back to queued.
+    state: Mapped[str] = mapped_column(String(20), index=True, default="queued")
+    params: Mapped[dict] = mapped_column(JSON)
+    list_before: Mapped[str | None] = mapped_column(String(88), nullable=True)
+    pages: Mapped[int] = mapped_column(Integer, default=0)
+    reached_start: Mapped[bool] = mapped_column(Boolean, default=False)
+    oldest: Mapped[list | None] = mapped_column(JSON, nullable=True)  # oldest signatures seen, newest first
+    launch_signature: Mapped[str | None] = mapped_column(String(88), nullable=True)
+    launch_slot: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    launch_time: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    creator: Mapped[str | None] = mapped_column(String(44), nullable=True)
+    outcome: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    declared_peak_cap_usd: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    declared_peak_source: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    locked_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+    heartbeat_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    finished_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
+class EarlyBuy(Base):
+    """A buy among a seed's earliest trades. The wallet is a candidate, not necessarily a tracked wallet."""
+
+    __tablename__ = "early_buys"
+    __table_args__ = (UniqueConstraint("mint", "wallet", "signature", "event_index"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mint: Mapped[str] = mapped_column(ForeignKey("discovery_seeds.mint"), index=True)
+    wallet: Mapped[str] = mapped_column(String(44), index=True)
+    signature: Mapped[str] = mapped_column(String(88))
+    event_index: Mapped[int] = mapped_column(Integer)
+    slot: Mapped[int] = mapped_column(Integer)
+    block_time: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rank: Mapped[int] = mapped_column(Integer)  # 1 = first buyer after launch (ties share a slot)
+    details: Mapped[dict] = mapped_column(JSON)
+
+
 class AnalysisSnapshot(Base):
     __tablename__ = "analysis_snapshots"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)

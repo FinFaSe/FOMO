@@ -84,6 +84,43 @@ def _market_cap(price_usd: Decimal, decimals: int | None, is_pump: bool, facts: 
     return None, None, None, "unknown"
 
 
+def load_candles(session, prices, times: list[int], needed: list[int] | None = None, *,
+                 max_requests: int = 20) -> tuple[dict[int, PriceCandle], int, list[str]]:
+    """Cached SOL/USD candles around `times`; fetches what `needed` lacks (prices=None: cache only)."""
+    source = getattr(prices, "source", None)
+    symbol = getattr(prices, "symbol", "SOL-USD")
+    wanted = _neighborhoods(times)
+    cache: dict[int, PriceCandle] = {}
+    for i in range(0, len(wanted), 500):
+        query = select(PriceCandle).where(PriceCandle.symbol == symbol, PriceCandle.minute.in_(wanted[i:i + 500]))
+        if source:
+            query = query.where(PriceCandle.source == source)
+        cache.update({c.minute: c for c in session.scalars(query)})
+    missing = sorted({t // 60 * 60 for t in (times if needed is None else needed) if _candle(cache, t)[0] is None})
+    requests, issues = 0, []
+    if prices is not None and missing:
+        for start, end in _windows(missing):
+            if requests >= max_requests:
+                issues.append("price_request_budget_reached")
+                break
+            candles = prices.minute_candles(start, end)
+            requests += 1
+            for c in candles:
+                if c["minute"] in cache:
+                    continue
+                row = PriceCandle(source=source, symbol=symbol, minute=c["minute"],
+                                  **{k: str(c[k]) for k in ("open", "high", "low", "close")})
+                session.add(row)
+                cache[c["minute"]] = row
+            session.commit()
+    return cache, requests, issues
+
+
+def sol_usd(cache: dict[int, PriceCandle], block_time: int) -> Decimal | None:
+    candle, _ = _candle(cache, block_time)
+    return Decimal(candle.close) if candle else None
+
+
 def price_trades(session, wallet: str, prices, *, max_requests: int = 20) -> dict:
     """Value the wallet's buys and sells in USD. `prices=None` uses cached candles only (no network)."""
 
@@ -98,32 +135,11 @@ def price_trades(session, wallet: str, prices, *, max_requests: int = 20) -> dic
               "source": None, "issues": []}
     if not pending:
         return report
+    needed = [t.block_time for t in pending if _needs_usd(t)]
+    cache, requests, issues = load_candles(session, prices, [t.block_time for t in pending], needed,
+                                           max_requests=max_requests)
+    report["price_requests"], report["issues"] = requests, issues
     source = getattr(prices, "source", None)
-    symbol = getattr(prices, "symbol", "SOL-USD")
-    wanted = _neighborhoods([t.block_time for t in pending])
-    cache: dict[int, PriceCandle] = {}
-    for i in range(0, len(wanted), 500):
-        query = select(PriceCandle).where(PriceCandle.symbol == symbol, PriceCandle.minute.in_(wanted[i:i + 500]))
-        if source:
-            query = query.where(PriceCandle.source == source)
-        cache.update({c.minute: c for c in session.scalars(query)})
-    needed = sorted({t.block_time // 60 * 60 for t in pending if _needs_usd(t)})
-    missing = [m for m in needed if _candle(cache, m)[0] is None]
-    if prices is not None and missing:
-        for start, end in _windows(missing):
-            if report["price_requests"] >= max_requests:
-                report["issues"].append("price_request_budget_reached")
-                break
-            candles = prices.minute_candles(start, end)
-            report["price_requests"] += 1
-            for c in candles:
-                if c["minute"] in cache:
-                    continue
-                row = PriceCandle(source=source, symbol=symbol, minute=c["minute"],
-                                  **{k: str(c[k]) for k in ("open", "high", "low", "close")})
-                session.add(row)
-                cache[c["minute"]] = row
-            session.commit()
     for t in pending:
         d = t.details
         usd = dict(d.get("usd") or {})

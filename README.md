@@ -101,12 +101,23 @@ La correlación entre tokens aún puede reducir la independencia. Ver [método](
    Token-2022 restrictivas, liquidez < USD 10.000). Precio del par más líquido en DEX Screener, caché de 1 min;
    si la fuente falla se muestran las últimas cotizaciones con aviso. Es precio de mercado, no de ejecución, y
    no entra en snapshots ni ranking. `GET /api/tokens/{mint}` devuelve los datos guardados de un token.
-5. Opcional: importa un ledger JSON documentado. Si la cadena ya aporta el evento de la misma firma y mint,
+5. **Descubrimiento** (pestaña propia): añade tokens semilla —ganadores y también fracasos— con
+   `POST /api/discovery/seeds`. El worker (o `POST /api/discovery/seeds/{mint}/scan`) lista las firmas de su
+   bonding curve de pump.fun hasta la creación (o del pool indicado; reanuda si se agota el presupuesto de
+   páginas), descarga las primeras operaciones (100 por defecto) y registra cada comprador con rango, minutos
+   tras el lanzamiento, market cap de entrada y marcas (creador, compra en la creación, mismo bloque del
+   lanzamiento). El pico de cada semilla es un **límite inferior**: máximo entre las operaciones escaneadas, la
+   cotización actual y un pico declarado opcional (marcado como tal). `GET /api/discovery/candidates` cruza las
+   semillas: una wallet acierta una semilla si ese pico llega al múltiplo elegido (10× por defecto) desde su
+   entrada; se ordena por aciertos y límite inferior de Wilson y por defecto excluye las wallets marcadas.
+   «Estudiar» (`POST /api/discovery/candidates/{wallet}/study`) la añade y encola su sincronización.
+   `POST /api/discovery` (firmantes recientes) ahora escanea la bonding curve cuando existe.
+6. Opcional: importa un ledger JSON documentado. Si la cadena ya aporta el evento de la misma firma y mint,
    prevalece el de la cadena.
    La importación es una declaración externa, **no** evidencia verificada por sí misma.
-6. **Verificar ledger** comprueba fecha y delta neto del token contra el RPC. No valida
+7. **Verificar ledger** comprueba fecha y delta neto del token contra el RPC. No valida
    automáticamente que fuera un swap ni sus precios históricos USD o capitalización.
-7. Examina métricas exploratorias, exclusiones y snapshot; añade wallets a la watchlist.
+8. Examina métricas exploratorias, exclusiones y snapshot; añade wallets a la watchlist.
 
 Formato del ledger (números decimales como strings; ver modelo `LedgerImport` en OpenAPI):
 

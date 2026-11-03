@@ -19,6 +19,7 @@ from sqlalchemy import func, select, update
 
 from .adapters.solana import ProviderError
 from .db import Job, Trade, Wallet, WorkerHeartbeat, now_iso
+from .discovery import claim_seed, recover_stale_seeds, scan_seed
 from .pricing import price_trades
 from .schemas import JobRequest, SyncRequest
 from .service import ingest
@@ -240,9 +241,9 @@ def worker_status(session) -> dict:
 
 
 class Worker:
-    def __init__(self, sessions, rpc, prices, *, worker_id: str | None = None,
+    def __init__(self, sessions, rpc, prices, *, quotes=None, worker_id: str | None = None,
                  refresh_minutes: float | None = None, poll_seconds: float = 2.0, progress_interval: float = 1.0):
-        self.sessions, self.rpc, self.prices = sessions, rpc, prices
+        self.sessions, self.rpc, self.prices, self.quotes = sessions, rpc, prices, quotes
         self.id = worker_id or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:6]}"
         if refresh_minutes is None:
             refresh_minutes = float(os.getenv("TRACKER_REFRESH_MINUTES", "30"))
@@ -259,8 +260,8 @@ class Worker:
             row.heartbeat_at = now_iso()
         session.commit()
 
-    def run_once(self) -> Job | None:
-        """Housekeeping plus at most one job. Returns the job that ran, if any."""
+    def run_once(self):
+        """Housekeeping plus at most one job or seed scan. Returns what ran (Job or DiscoverySeed), if any."""
         with self.sessions() as session:
             self.beat(session)
             recover_stale(session)
@@ -268,10 +269,18 @@ class Worker:
                 schedule_refresh(session, self.refresh, JobRequest())
                 self.next_schedule = time.monotonic() + 60
             job = claim(session, self.id)
-            if job is None:
+            if job is not None:
+                self.run(session, job)
+                return job
+            # Idle: scan one queued discovery seed (lower priority than wallet syncs).
+            recover_stale_seeds(session)
+            seed = claim_seed(session, self.id)
+            if seed is None:
                 return None
-            self.run(session, job)
-            return job
+            log.info("discovery: scanning seed %s", seed.mint)
+            report = scan_seed(session, self.rpc, self.prices, self.quotes, seed)
+            log.info("discovery: seed %s %s", seed.mint, report["state"])
+            return seed
 
     def run(self, session, job: Job):
         wallet = session.get(Wallet, job.wallet)

@@ -4,6 +4,7 @@ import os
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -17,6 +18,8 @@ from .adapters.quotes import DexScreenerQuotes
 from .adapters.solana import ProviderError, SolanaRPC, digest, observe
 from .db import (
     AnalysisSnapshot,
+    DiscoverySeed,
+    EarlyBuy,
     Job,
     Observation,
     RawTransaction,
@@ -28,6 +31,7 @@ from .db import (
     database,
     now_iso,
 )
+from .discovery import add_seed, candidates, scan_seed, seed_json
 from .jobs import Worker, cancel, enqueue, ensure_idle, job_json, run_inline, worker_status
 from .portfolio import open_positions
 from .pricing import price_trades
@@ -37,6 +41,7 @@ from .schemas import (
     FomoResolve,
     JobRequest,
     LedgerImport,
+    SeedCreate,
     SyncRequest,
     WalletCreate,
     WalletUpdate,
@@ -44,6 +49,7 @@ from .schemas import (
     utc,
 )
 from .service import chain_positions, import_ledger, renormalize, verify_ledger, wallet_analysis, wallet_fills
+from .tokens import PUMP_PROGRAM, pump_bonding_curve
 
 
 def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None, quotes=None) -> FastAPI:
@@ -52,7 +58,7 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None, quot
         # Optional single-process mode for local use; production runs `python -m tracker.worker`.
         stop = threading.Event()
         if os.getenv("TRACKER_EMBEDDED_WORKER") == "1":
-            worker = Worker(sessions, rpc, prices)
+            worker = Worker(sessions, rpc, prices, quotes=quotes)
             threading.Thread(target=worker.run_forever, args=(stop,), daemon=True, name="tracker-worker").start()
         yield
         stop.set()
@@ -327,11 +333,68 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None, quot
         return {"signature": signature, "source": raw.source, "fetched_at": raw.fetched_at,
                 "payload_sha256": raw.digest, "payload": raw.payload}
 
+    @app.post("/api/discovery/seeds", status_code=201)
+    def add_discovery_seed(body: SeedCreate, s=Depends(session)):
+        seed, created = add_seed(s, body)
+        return {"seed": seed_json(seed), "created": created}
+
+    @app.get("/api/discovery/seeds")
+    def discovery_seeds(s=Depends(session)):
+        rows = s.scalars(select(DiscoverySeed).order_by(DiscoverySeed.created_at.desc()))
+        return {"items": [seed_json(r) for r in rows]}
+
+    @app.post("/api/discovery/seeds/{mint}/scan", dependencies=[Depends(write_guard)])
+    def scan_discovery_seed(mint: str, s=Depends(session)):
+        # Synchronous, bounded scan (scripts, tests); the worker scans queued seeds in the background.
+        seed = s.get(DiscoverySeed, mint)
+        if not seed:
+            raise HTTPException(404, "Semilla no encontrada")
+        if seed.state == "scanning":
+            raise HTTPException(409, "La semilla se está escaneando")
+        seed.state = "scanning"
+        s.commit()
+        report = scan_seed(s, rpc, prices, quotes, seed)
+        return {"report": report, "seed": seed_json(seed)}
+
+    @app.get("/api/discovery/seeds/{mint}/buyers")
+    def discovery_buyers(mint: str, limit: int = Query(100, ge=1, le=300), s=Depends(session)):
+        if not s.get(DiscoverySeed, mint):
+            raise HTTPException(404, "Semilla no encontrada")
+        rows = s.scalars(select(EarlyBuy).where(EarlyBuy.mint == mint).order_by(EarlyBuy.rank).limit(limit))
+        return {"items": [{"wallet": r.wallet, "rank": r.rank, "signature": r.signature, "slot": r.slot,
+                           "block_time": r.block_time, "transaction_url": f"https://solscan.io/tx/{r.signature}",
+                           **r.details} for r in rows]}
+
+    @app.get("/api/discovery/candidates")
+    def discovery_candidates(multiple: Decimal = Query(Decimal(10), gt=1, le=10000),
+                             min_seeds: int = Query(1, ge=1, le=100), include_flagged: bool = False,
+                             limit: int = Query(100, ge=1, le=500), s=Depends(session)):
+        return candidates(s, multiple=multiple, min_seeds=min_seeds, include_flagged=include_flagged, limit=limit)
+
+    @app.post("/api/discovery/candidates/{wallet}/study", status_code=202)
+    def study_candidate(wallet: str, s=Depends(session)):
+        try:
+            address(wallet)
+        except ValueError:
+            raise HTTPException(422, "Dirección Solana inválida") from None
+        row = s.get(Wallet, wallet)
+        if row is None:
+            seeds = len(set(s.scalars(select(EarlyBuy.mint).where(EarlyBuy.wallet == wallet))))
+            row = Wallet(address=wallet, label=f"Descubierta · {seeds} semillas")
+            s.add(row)
+            s.commit()
+        job, created = enqueue(s, wallet, JobRequest())
+        return {"wallet": wallet_json(row), "job": job_json(job), "created": created}
+
     @app.post("/api/discovery", dependencies=[Depends(write_guard)])
     def discovery(body: DiscoveryRequest, s=Depends(session)):
         candidates = set()
         evidence = []
-        for item in rpc.signatures(body.token, limit=body.limit):
+        # pump.fun trades touch the bonding curve, not necessarily the mint: scan the curve when it exists.
+        curve = pump_bonding_curve(body.token)
+        account = rpc.accounts([curve], encoding="base64", data_slice={"offset": 0, "length": 0})[0]
+        scanned = curve if account and account.get("owner") == PUMP_PROGRAM else body.token
+        for item in rpc.signatures(scanned, limit=body.limit):
             if item.get("err"):
                 continue
             tx = rpc.transaction(item["signature"])
@@ -349,10 +412,10 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None, quot
             if not s.get(Wallet, candidate):
                 s.add(Wallet(address=candidate, label="Candidato on-chain"))
         s.commit()
-        return {"candidates": sorted(candidates), "evidence_signatures": evidence,
+        return {"candidates": sorted(candidates), "evidence_signatures": evidence, "scanned_address": scanned,
                 "classification": "unverified_candidates", "coverage": "bounded_seed_scan",
-                "notice": "Firmantes, no ganadores demostrados. Incluye semillas fallidas y wallets manuales; "
-                          "el escaneo por mint no enumera todos sus swaps ni elimina sesgo de supervivencia."}
+                "notice": "Firmantes recientes, no ganadores demostrados. Para compradores tempranos y su cruce "
+                          "entre tokens usa las semillas de descubrimiento (/api/discovery/seeds)."}
 
     @app.post("/api/integrations/fomo/resolve", dependencies=[Depends(write_guard)])
     def fomo_resolve(body: FomoResolve, s=Depends(session)):

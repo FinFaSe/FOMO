@@ -91,3 +91,15 @@ export type OpenPositions = {
   totals: { open_positions: number; valued_positions: number; value_usd: string; cost_basis_usd: string;
     unrealized_pnl_usd: string };
 };
+export type Seed = {
+  mint: string; label: string; scan_address: string; address_kind: string; state: string; pages: number;
+  launch_time: string | null; creator: string | null; error: string | null; declared_peak_cap_usd: string | null;
+  outcome: { pump_origin: boolean; launch_cap_usd: string | null; peak_cap_lower_bound_usd: string | null;
+    peak_basis: string | null; peak_multiple_from_launch: string | null; early_buyers: number; issues: string[] } | null;
+};
+export type Candidate = {
+  wallet: string; seeds: number; hits: number; misses: number; unknown: number; hit_rate: number | null;
+  hit_rate_ci95: [number | null, number | null]; declared_peak_hits: number; median_minutes_after_launch: number | null;
+  median_rank: number; flags: string[]; tracked: boolean;
+  entries: { mint: string; label: string; rank: number; status: string; multiple: string | null; entry_cap_usd: string | null }[];
+};

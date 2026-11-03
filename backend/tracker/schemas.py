@@ -120,6 +120,37 @@ class JobRequest(SyncRequest):
         return SyncRequest(**self.model_dump(include=set(SyncRequest.model_fields)))
 
 
+class SeedCreate(StrictModel):
+    mint: str = Field(max_length=44)
+    label: str = Field(default="", max_length=80)
+    # Optional pool address for tokens that are not from pump.fun (their bonding curve is derived).
+    pool: str | None = Field(default=None, max_length=44)
+    early_trades: int = Field(default=100, ge=10, le=300)
+    max_pages: int = Field(default=20, ge=1, le=100)
+    # Optional declared peak market cap (e.g. from a chart); always labeled as declared, never verified.
+    peak_market_cap_usd: Money | None = None
+    peak_source_url: str | None = Field(default=None, max_length=500)
+
+    _mint = field_validator("mint")(validate_address)
+
+    @field_validator("pool")
+    @classmethod
+    def _pool(cls, value):
+        return validate_address(value) if value is not None else None
+
+    @field_validator("peak_source_url")
+    @classmethod
+    def _source(cls, value):
+        if value is None:
+            return value
+        from urllib.parse import urlsplit
+
+        u = urlsplit(value)
+        if u.scheme != "https" or not u.hostname or u.username or u.password or u.query or u.fragment:
+            raise ValueError("Usa una referencia HTTPS pública sin credenciales, query ni fragmento")
+        return value
+
+
 class DiscoveryRequest(StrictModel):
     token: str = Field(max_length=44)
     limit: int = Field(default=3, ge=1, le=10)

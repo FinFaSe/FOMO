@@ -86,6 +86,23 @@ pendiente, `covered_from ≤ inicio de ventana`, `caught_up_at ≥ as_of`, sin `
 transacciones normalizadas por la versión vigente. `caught_up_at` es el inicio del escaneo menos 120 s, por el
 retraso de `finalized`. Sin `as_of` explícito, el análisis y el ranking usan el `caught_up_at` de cada wallet.
 
+## Descubrimiento hacia atrás
+
+- Semilla = token cuyas primeras operaciones se escanean. Para mints de pump.fun se lista la PDA de su bonding curve
+  (toda operación en la curva la toca) hasta la firma más antigua, que es la creación; para otros tokens, el pool
+  indicado. Se procesan las primeras N transacciones no fallidas (100 por defecto) con el mismo normalizador.
+- Cada compra registra rango (orden de aparición; el orden intrabloque no es exacto), minutos tras la creación,
+  market cap de entrada (vela SOL/USD × 1e9 si la creación usó el programa de pump.fun; si no, estimado o
+  desconocido como en el resto) y marcas: `creator` (firmante de la creación), `launch_tx` (compra en la propia
+  creación) y `launch_slot` (mismo bloque que la creación, típico de bundles y snipers). Por defecto los candidatos
+  excluyen wallets con marcas.
+- Pico de la semilla = máximo de: market cap de las operaciones escaneadas, market cap actual de DEX Screener y un
+  pico declarado opcional. Es un límite inferior del pico real (no hay historial OHLC verificado), así que un
+  acierto (`pico ≥ múltiplo × entrada`) nunca se concede de más; los aciertos que dependen de un pico declarado se
+  cuentan aparte.
+- Sesgo de supervivencia: la tasa de aciertos solo es informativa si las semillas incluyen fracasos. Los candidatos
+  no entran al ranking por sí mismos: hay que sincronizarlos y superar la validación normal.
+
 ## Muestra y consistencia
 
 El win rate observado es `ciclos con PnL > 0 / ciclos cerrados evaluables`; break-even permanece en el denominador.

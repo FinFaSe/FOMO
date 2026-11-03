@@ -43,9 +43,10 @@ class SyntheticRPC:
         self.history = [{"signature": SIG, "blockTime": int(AS_OF.timestamp()), "err": None}]
         self.fetches = []
         self.account_data, self.account_calls = {}, []
+        self.histories = {}  # per-address histories (e.g. a bonding curve); others use `history`
 
     def signatures(self, wallet, before=None, until=None, limit=10):
-        items = list(self.history)
+        items = list(self.histories.get(wallet, self.history))
         if before:
             names = [i["signature"] for i in items]
             items = items[names.index(before) + 1:] if before in names else []

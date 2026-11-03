@@ -10,6 +10,7 @@ import signal
 import threading
 
 from .adapters.prices import CoinbaseCandles
+from .adapters.quotes import DexScreenerQuotes
 from .adapters.solana import SolanaRPC
 from .db import database
 from .jobs import Worker
@@ -21,7 +22,7 @@ def main():
     stop = threading.Event()
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.set())
-    Worker(sessions, SolanaRPC(), CoinbaseCandles()).run_forever(stop)
+    Worker(sessions, SolanaRPC(), CoinbaseCandles(), quotes=DexScreenerQuotes()).run_forever(stop)
 
 
 if __name__ == "__main__":
