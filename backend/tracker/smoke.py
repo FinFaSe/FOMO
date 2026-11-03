@@ -261,9 +261,12 @@ def run(rpc, prices, quotes, history, jito=jito_tip_accounts, *, db_url: str, si
     def venue_program_ids():
         """Every recognized pool program still owns the pools GeckoTerminal lists for its DEX."""
         venues = venue_programs(rpc, history, per_dex=10)
-        wrong = {dex: v["owners"] for dex, v in venues.items() if not v["ok"]}
+        wrong = {dex: v["owners"] for dex, v in venues.items() if v["ok"] is False}
+        checked = [dex for dex, v in venues.items() if v["ok"]]
         assert not wrong, f"pools con otro programa: {wrong}"
-        return {"dexes": len(venues), "pools": sum(v["pools"] for v in venues.values())}
+        assert checked, "GeckoTerminal no respondió para ningún DEX"
+        return {"dexes": len(checked), "pools": sum(v["pools"] for v in venues.values()),
+                "unchecked": sorted(dex for dex, v in venues.items() if v["ok"] is None)}
 
     def jito_accounts():
         live = set(jito())

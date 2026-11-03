@@ -2,6 +2,67 @@
 
 Solo se describe lo observado; no se ha probado una estrategia rentable.
 
+## 3 de noviembre de 2026: validación con datos reales
+
+### Normalizador frente a GeckoTerminal (`python -m tracker.crosscheck`)
+
+172 operaciones reales de 19 pools en tendencia (PumpSwap, Raydium, Meteora DLMM y DAMM v2, Orca), con las
+transacciones descargadas del RPC y normalizadas para el firmante dueño del cambio de tokens:
+
+| Resultado | Antes (v3) | Ahora (v4) |
+| --- | --- | --- |
+| `agree`: mismo lado y exactamente la misma cantidad de tokens | 100 | 111 |
+| `disagree` | 0 | **0** (100 % de coincidencia en las de un solo pool) |
+| `split_route`: la wallet operó por varios pools; GeckoTerminal da un tramo | 15 | 17 |
+| `not_trader`: ningún firmante es dueño del cambio (bóvedas, ejecutores de órdenes, residuo de arbitraje) | 35 | 35 |
+| `unverified` | 22 | 9 (todas token por token) |
+
+- El importe que mide el tracker (lo que pagó o recibió la wallet) difiere del tramo del pool de GeckoTerminal en
+  una mediana del 1,1 % (p90 3,0 %): son las comisiones del venue y de los servicios, incluidas a propósito.
+- **58 de 172 operaciones (34 %) las paga un relayer**: el pagador (`accountKeys[0]`, y el `tx_from_address` de
+  GeckoTerminal) no es quien opera. Atribuir por el pagador equivocaría un tercio de las operaciones.
+- Los programas de pools reconocidos se comprobaron en la cadena: son los dueños de los 20 primeros pools que
+  GeckoTerminal lista para cada DEX. Eso confirmó los 6 que ya se usaban y añadió Orca Whirlpools, Meteora
+  DLMM/DAMM v2/DBC, FluxBeam, boop.fun, Byreal, Manifest y ZeroFi (letsbonk.fun usa el programa de Raydium
+  LaunchLab). Los sitios de documentación de Meteora y Orca no eran accesibles desde este entorno.
+- Las 6 operaciones que GeckoTerminal y el tracker clasificaban distinto eran residuo de arbitraje, la comisión
+  en tokens de un ejecutor de órdenes, una venta cuyo cobro iba a otra wallet y una venta de 0,0000036 SOL: el
+  firmante no era el trader.
+
+### Wallets reales sincronizadas con el worker (PostgreSQL 16, RPC público)
+
+Cinco wallets elegidas entre los pagadores de swaps recientes por tener actividad de aspecto humano (30-400
+firmas en 90 días); de las 19 candidatas, 12 acumulaban 1.000 firmas en menos de tres semanas (bots) y 2 casi
+no tenían actividad. 565 transacciones:
+
+| Medida | Resultado |
+| --- | --- |
+| Compras/ventas `verified` (mismas transacciones, v3 → v4) | 304 de 319 (95,3 %) → **314 de 319 (98,4 %)** |
+| Sin venue reconocido (v3 → v4) | 6 → **0** |
+| Sin precio asignable (v3 → v4) | 9 → 5 (token por token); 4 resueltas como stablecoin + rent |
+| Valoradas en USD | todas las verificadas |
+| Market cap de entrada (189 compras) | 170 verificado, 16 estimado, 3 desconocido |
+| Posiciones cerradas evaluables | 82 de 101; las demás, sobre todo inventario abierto antes de lo sincronizado (11) |
+| Transacciones fallidas | 55 de 565 (9,7 %) |
+| Ranking | 0 elegibles; 3 de 5 marcadas como bot probable |
+| Ventana de 90 días completa | 3 de 5; las dos más largas quedaron parciales por el límite del RPC público |
+
+Lo que estos datos destaparon y se corrigió:
+
+- **RPC público**: ~3 s por transacción antigua y 429 en casi la mitad de las peticiones (43 de 98) incluso a
+  una cada 4 s (probablemente por compartir IP de salida). Descarga en paralelo por página: de 15 a 37 transacciones/min antes
+  de que el límite apretara; limitador adaptativo común a todos los hilos; reintento en turno de las descargas
+  fallidas. **3 de 5 syncs fallaban** porque cada ronda cortada por el límite contaba como intento fallido aunque
+  guardara progreso; ya no cuenta.
+- **Proveedor sin archivo**: `solana-rpc.publicnode.com` solo lista ~1,6 días de firmas
+  (`getFirstAvailableBlock` ≠ 0). Con el código anterior una wallet de 354 firmas en 90 días quedaba «completa»
+  con 33; ahora la sync queda parcial con `rpc_history_horizon` (comprobado contra ese proveedor).
+- Una ronda de comparación más corta corre en `python -m tracker.smoke` (`trades_vs_geckoterminal`: 8 de 8
+  coincidencias en la última ejecución) junto con `venue_program_ids`.
+
+Las direcciones de las wallets muestreadas no se guardan en el repositorio. Ninguna de estas cifras dice nada de
+la rentabilidad de copiar a nadie.
+
 ## 3 de noviembre de 2026: red real (`python -m tracker.smoke`)
 
 Primera ejecución con acceso a Solana RPC público, Coinbase, DEX Screener, GeckoTerminal y el block engine de

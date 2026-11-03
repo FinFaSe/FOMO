@@ -7,6 +7,7 @@ from decimal import Decimal
 import httpx
 
 from tracker.adapters.geckoterminal import GeckoTerminal
+from tracker.adapters.solana import ProviderError
 from tracker.crosscheck import compare, crosscheck, summarize, venue_programs
 from tracker.normalize import GECKO_DEXES, VENUES, WSOL
 
@@ -85,7 +86,16 @@ def test_venue_programs_flags_pools_owned_by_another_program():
             rpc.account_data[f"{dex}-{i}"] = {"owner": programs[sorted(names)[0]]}
     rpc.account_data["orca-2"] = {"owner": "SomeOtherProgram"}
     result = venue_programs(rpc, Gecko())
-    assert result["meteora"]["ok"] and not result["orca"]["ok"]
+    assert result["meteora"]["ok"] and result["orca"]["ok"] is False
+
+    class Limited(Gecko):
+        def dex_pools(self, dex):
+            if dex == "fluxbeam":
+                raise ProviderError("Historial de precios limitado temporalmente", 503)
+            return super().dex_pools(dex)
+
+    limited = venue_programs(rpc, Limited())
+    assert limited["fluxbeam"]["ok"] is None and limited["meteora"]["ok"]  # unchecked, not wrong
 
 
 def test_adapter_parses_trades_and_drops_anomalous_or_malformed_rows():

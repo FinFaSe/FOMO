@@ -135,7 +135,11 @@ def venue_programs(rpc, gecko, dexes: dict[str, set[str]] = GECKO_DEXES, per_dex
     programs = {name: program for program, name in VENUES.items()}
     out = {}
     for dex, names in dexes.items():
-        pools = gecko.dex_pools(dex)[:per_dex]
+        try:
+            pools = gecko.dex_pools(dex)[:per_dex]
+        except ProviderError as exc:  # a rate limit says nothing about the programs: this DEX stays unchecked
+            out[dex] = {"pools": 0, "owners": {}, "ok": None, "error": exc.message}
+            continue
         owners = Counter()
         for i in range(0, len(pools), 100):
             for account in rpc.accounts(pools[i:i + 100], encoding="base64", data_slice={"offset": 0, "length": 0}):
@@ -161,7 +165,7 @@ def main(argv=None) -> int:
         report["venues"] = venue_programs(rpc, gecko)
     print(json.dumps(report, indent=2, ensure_ascii=False, default=str))
     return 0 if not report["trades"]["disagreements"] and all(
-        v["ok"] for v in report.get("venues", {}).values()) else 1
+        v["ok"] is not False for v in report.get("venues", {}).values()) else 1
 
 
 if __name__ == "__main__":

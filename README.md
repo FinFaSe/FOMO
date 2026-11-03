@@ -232,7 +232,7 @@ Campos opcionales `fdv_usd` y `liquidity_usd` se conservan como declaraciones, s
 ## Fuentes y credenciales
 
 El RPC público funciona sin clave, pero limita mucho: en la validación del 3 de noviembre de 2026 respondió
-429 a una de cada dos peticiones incluso a una cada 4 s, y tarda ~3 s por transacción antigua. Para historiales
+429 a casi la mitad de las peticiones incluso a una cada 4 s, y tarda ~3 s por transacción antigua. Para historiales
 de 90 días configura `SOLANA_RPC_URL` con un proveedor HTTPS **de archivo** (historial completo). El tracker lo
 comprueba: si el primer bloque disponible del proveedor no es el 0 (`getFirstAvailableBlock`), el final de un
 listado de firmas es el horizonte del proveedor y no el inicio de la wallet, así que la sync queda parcial con
