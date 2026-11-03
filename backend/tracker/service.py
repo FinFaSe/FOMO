@@ -18,7 +18,7 @@ from .db import (
     bump_analysis_revision,
     now_iso,
 )
-from .normalize import NORMALIZER_VERSION, normalize
+from .normalize import NORMALIZER_VERSION, fee_sol, normalize
 from .schemas import Filters, LedgerImport, SyncRequest
 
 
@@ -56,6 +56,7 @@ def store_trades(session, wallet: str, raw: RawTransaction) -> int:
         details = {"token_amount": str(e["token_amount"]), "decimals": e["decimals"], "quote_asset": e["quote_asset"],
                    "quote_amount": _text(e["quote_amount"]), "price": _text(e["price"]),
                    "network_fee_sol": str(e["network_fee_sol"]), "tip_sol": str(e["tip_sol"]),
+                   "other_sol": str(e["other_sol"]),
                    "venues": e["venues"], "issues": e["issues"],
                    "evidence": {"trade": e["trade"], "usd": "unknown", "market_cap": "unknown",
                                 "payload_sha256": raw.digest, "rpc_source": raw.source}}
@@ -123,6 +124,42 @@ def _missing_block_time(state: SyncState | None, report: dict):
         report["issues"].append("missing_block_time")
 
 
+class _Prefetched:
+    """The RPC as seen by one page: transactions fetched ahead (concurrently) are served from memory in the
+    same order as fetching them one by one; anything else, and any download that failed ahead, goes to the RPC."""
+
+    def __init__(self, rpc, fetched: dict):
+        self.rpc, self.fetched, self.source = rpc, fetched, rpc.source
+
+    def transaction(self, signature: str):
+        value = self.fetched.pop(signature, None)
+        if value is None or isinstance(value, Exception):
+            # A download that failed ahead of time (usually rate limiting while many were in flight) gets one
+            # fresh attempt when its turn comes; only a second failure stops the page there.
+            return self.rpc.transaction(signature)
+        return value
+
+    def __getattr__(self, name):
+        return getattr(self.rpc, name)
+
+
+def prefetch(session, rpc, signatures: list[str], *, wallet: str | None = None, refresh: bool = False):
+    """Fetch concurrently the transactions a sequential pass over `signatures` would download: not stored yet
+    (or all of them with refresh) and not already observed for the wallet. Processing order is unchanged, so
+    cursors, partial failures and progress behave exactly as before; only the waiting overlaps."""
+    many = getattr(rpc, "transactions", None)
+    if many is None or len(signatures) < 2:
+        return rpc
+    wanted = list(dict.fromkeys(signatures))
+    if not refresh:
+        stored = set(session.scalars(select(RawTransaction.signature).where(RawTransaction.signature.in_(wanted))))
+        if wallet is not None:
+            stored |= set(session.scalars(select(Observation.signature).where(
+                Observation.wallet == wallet, Observation.signature.in_(wanted))))
+        wanted = [sig for sig in wanted if sig not in stored]
+    return _Prefetched(rpc, many(wanted)) if len(wanted) > 1 else rpc
+
+
 def _page(rpc, wallet: Wallet, report: dict, budget: list[int], **kwargs):
     """List one page. An empty listing (nothing new) is reported but does not spend the budget."""
     page = rpc.signatures(wallet.address, **kwargs)
@@ -130,6 +167,16 @@ def _page(rpc, wallet: Wallet, report: dict, budget: list[int], **kwargs):
     if page:
         budget[0] -= 1
     return page
+
+
+def _within(page: list[dict], since: int) -> list[dict]:
+    """The leading items of a newest-first page that are inside the window (processing stops at the first older)."""
+    out = []
+    for item in page:
+        if item.get("blockTime") is not None and item["blockTime"] < since:
+            break
+        out.append(item)
+    return out
 
 
 def _noop(report: dict):
@@ -143,8 +190,9 @@ def _catch_up(session, wallet: Wallet, rpc, state: SyncState, request: SyncReque
     while budget[0] > 0:
         page = _page(rpc, wallet, report, budget, before=state.catchup_before,
                      until=state.head_signature, limit=request.page_size)
+        fetch = prefetch(session, rpc, [i["signature"] for i in page], wallet=wallet.address)
         for item in page:
-            _record(session, wallet, rpc, item["signature"], report)
+            _record(session, wallet, fetch, item["signature"], report)
             if state.catchup_head is None:
                 state.catchup_head = item["signature"]
             state.catchup_before = item["signature"]
@@ -171,6 +219,7 @@ def _backfill(session, wallet: Wallet, rpc, state: SyncState, request: SyncReque
         return True
     while budget[0] > 0:
         page = _page(rpc, wallet, report, budget, before=state.tail_signature, limit=request.page_size)
+        fetch = prefetch(session, rpc, [i["signature"] for i in _within(page, since)], wallet=wallet.address)
         for item in page:
             block_time = item.get("blockTime")
             if block_time is not None and block_time < since:
@@ -180,7 +229,7 @@ def _backfill(session, wallet: Wallet, rpc, state: SyncState, request: SyncReque
                 state.updated_at = now_iso()
                 session.commit()
                 return True
-            _record(session, wallet, rpc, item["signature"], report)
+            _record(session, wallet, fetch, item["signature"], report)
             if state.head_signature is None:
                 state.head_signature = item["signature"]
             state.tail_signature = item["signature"]
@@ -193,11 +242,33 @@ def _backfill(session, wallet: Wallet, rpc, state: SyncState, request: SyncReque
             session.commit()
             tick(report)
         if len(page) < request.page_size:
+            if not _full_history(rpc, report):
+                # The provider keeps only recent history: the listing ended at its horizon, which says nothing
+                # about older activity. Coverage stays at the oldest listed signature.
+                state.updated_at = now_iso()
+                session.commit()
+                return False
             state.history_start_reached = True
             state.covered_from = 0
             state.updated_at = now_iso()
             session.commit()
             return True
+    return False
+
+
+def _full_history(rpc, report: dict) -> bool:
+    """Whether the end of a signature listing is the wallet's first transaction (full-history provider)."""
+    check = getattr(rpc, "full_history", None)
+    if check is None:
+        return True  # adapters without the check (tests, imports) list the full history
+    try:
+        if check():
+            return True
+        issue = "rpc_history_horizon"
+    except ProviderError:
+        issue = "rpc_history_unverified"
+    if issue not in report["issues"]:
+        report["issues"].append(issue)
     return False
 
 
@@ -208,11 +279,12 @@ def _revalidate(session, wallet: Wallet, rpc, request: SyncRequest, report: dict
     before = None
     while budget[0] > 0:
         page = _page(rpc, wallet, report, budget, before=before, limit=request.page_size)
+        fetch = prefetch(session, rpc, [i["signature"] for i in _within(page, since)], refresh=True)
         for item in page:
             block_time = item.get("blockTime")
             if block_time is not None and block_time < since:
                 return True
-            _record(session, wallet, rpc, item["signature"], report, refresh=True)
+            _record(session, wallet, fetch, item["signature"], report, refresh=True)
             if block_time is None:
                 _missing_block_time(None, report)
             session.commit()
@@ -468,7 +540,7 @@ def _sol_fill(t: Trade) -> Fill:
     return Fill(signature=t.signature, event_index=t.event_index, token=t.mint,
                 timestamp=datetime.fromtimestamp(t.block_time, timezone.utc), kind=t.kind,
                 quantity=Decimal(d["token_amount"]), gross_usd=sol,
-                fees_usd=Decimal(d["network_fee_sol"]) + Decimal(d.get("tip_sol", "0")),
+                fees_usd=fee_sol(d),
                 market_cap_usd=None, source_url=f"https://solscan.io/tx/{t.signature}", slot=t.slot,
                 evidence={**d["evidence"], "quote_asset": d["quote_asset"], "issues": d["issues"]})
 

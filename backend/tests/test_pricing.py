@@ -14,7 +14,7 @@ from tracker.pricing import MAX_CANDLES, _windows
 from .conftest import WALLET, b58
 from .test_chain_trades import serve
 from .test_incremental_sync import client  # noqa: F401  (fixture)
-from .test_normalize import RAYDIUM, SOL, USDC, balance, pump_buy, pump_sell, tx
+from .test_normalize import RAYDIUM, SOL, USDC, balance, pump_buy, pump_sell, relayed_usdc_sell, tx
 
 SYNC = f"/api/wallets/{WALLET}/sync"
 PUMPSWAP = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
@@ -169,3 +169,12 @@ def test_price_source_failure_keeps_the_sync_result(client):  # noqa: F811
     report = c.post(SYNC, json={}).json()
     assert report["state"] == "scanned" and report["trades"] == 1
     assert report["pricing"] == {"error": "Synthetic price source unavailable"}
+
+
+def test_a_sol_refund_set_aside_lowers_the_fees(client):  # noqa: F811
+    c, rpc = client
+    serve(rpc, [relayed_usdc_sell(1_488_440, block_time=int(time.time()) - 600)])
+    c.post(SYNC, json={})
+    [sell] = trades(c)
+    assert sell["other_sol"] == "-0.00148844" and sell["evidence"]["usd"] == "verified"
+    assert sell["usd"]["gross_usd"] == "21.575044" and Decimal(sell["usd"]["fees_usd"]) == Decimal("-0.00148844") * 150

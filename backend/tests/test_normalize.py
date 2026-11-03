@@ -2,7 +2,7 @@
 
 from decimal import Decimal
 
-from tracker.normalize import STABLES, VENUES, WSOL, legs, normalize
+from tracker.normalize import STABLES, VENUES, WSOL, fee_sol, legs, normalize
 
 from .conftest import TOKEN, WALLET, b58
 
@@ -181,3 +181,33 @@ def test_venue_registry_has_unique_valid_program_ids():
     assert len(set(VENUES.values())) == len(VENUES)
     for program in VENUES:
         address(program)
+
+
+RELAYER = b58(777)
+DLMM = next(p for p, name in VENUES.items() if name == "meteora-dlmm")
+
+
+def relayed_usdc_sell(refund_lamports, **kwargs):
+    """Shaped like real relayed sells (2026-11-03): a terminal's relayer pays the fee, the trader sells the token,
+    gets USDC through a SOL pool and a small SOL refund from the relayer."""
+    usdc_ata, token_ata = b58(781), b58(782)
+    return tx([RELAYER, WALLET, usdc_ata, token_ata, POOL],
+              [SOL, 0, RENT, RENT, 30 * SOL], [SOL - 15000 - refund_lamports, refund_lamports, RENT, RENT, 30 * SOL],
+              pre_tokens=[balance(2, USDC, WALLET, 0), balance(3, TOKEN, WALLET, 5_000_000)],
+              post_tokens=[balance(2, USDC, WALLET, 21_575_044), balance(3, TOKEN, WALLET, 0)],
+              programs=[COMPUTE, DLMM], fee=15000, signers={RELAYER, WALLET}, **kwargs)
+
+
+def test_small_sol_refund_next_to_a_stablecoin_quote_is_a_fee_not_a_second_quote():
+    [event] = normalize(relayed_usdc_sell(1_488_440), WALLET)
+    assert event["kind"] == "sell" and event["trade"] == "verified" and event["venues"] == ["meteora-dlmm"]
+    assert event["quote_asset"] == "USDC" and event["quote_amount"] == Decimal("21.575044")
+    assert event["other_sol"] == Decimal("-0.00148844")  # a refund: a negative cost
+    assert event["issues"] == ["small_sol_leg_counted_as_fee"] and event["network_fee_sol"] == 0  # relayer paid
+    assert fee_sol({k: str(v) for k, v in event.items() if k.endswith("_sol")}) == Decimal("-0.00148844")
+
+
+def test_a_real_sol_amount_next_to_a_stablecoin_stays_unallocatable():
+    [event] = normalize(relayed_usdc_sell(50_000_000), WALLET)  # 0.05 SOL is not rent
+    assert event["trade"] == "inferred" and event["quote_amount"] is None and event["other_sol"] == 0
+    assert "multi_leg_swap_quote_not_allocatable" in event["issues"]

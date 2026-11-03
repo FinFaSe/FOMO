@@ -164,11 +164,15 @@ def finish(session, job: Job, report: dict, *, chain: bool) -> Job | None:
         job.state, job.error = "cancelled", None
     elif report.get("error"):
         job.error = report["error"]
+        if report.get("transactions") or report.get("revalidated"):
+            # The round stored progress before the provider failed (typically rate limiting on a long
+            # history): that is not a failed attempt. Only rounds that make no progress count toward the limit.
+            job.attempts = 0
         if not chain or job.attempts >= MAX_ATTEMPTS:
             job.state = "failed"
         else:
             # Transient provider failure: back off and retry; stored progress is kept by the cursors.
-            delay = RETRY_BASE_SECONDS * 2 ** (job.attempts - 1)
+            delay = RETRY_BASE_SECONDS * 2 ** max(0, job.attempts - 1)
             job.state, job.locked_by = "queued", None
             job.run_after = (_now() + timedelta(seconds=delay)).isoformat()
     else:

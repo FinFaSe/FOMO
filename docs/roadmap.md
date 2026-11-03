@@ -2,8 +2,9 @@
 
 Implementado: primera ruta funcional de investigación, no la totalidad de la especificación.
 
-1. **Normalización verificable** (parcial: swaps por cambio de balance con venues reconocidos, en SOL/USDC/USDT;
-   ver método): decodificar swaps por programa y versión, cantidades/fees, rutas multipool,
+1. **Normalización verificable** (parcial: swaps por cambio de balance con 17 venues reconocidos, en SOL/USDC/USDT;
+   contrastada con el parser de GeckoTerminal en operaciones reales, 100 % de coincidencia en las de un solo pool;
+   falta valorar token por token a través del SOL intermedio de la ruta; ver método): decodificar swaps por programa y versión, cantidades/fees, rutas multipool,
    transacciones intrabloque ordenadas y transferencias de inventario relacionadas. Verificar cobertura desde la
    apertura de cada lote con un RPC de archivo; reconciliar saldos y no ocultar pérdidas fuera de la muestra.
 2. **Enriquecimiento histórico** (parcial: SOL/USD por minuto, market cap verificado para mints de pump.fun

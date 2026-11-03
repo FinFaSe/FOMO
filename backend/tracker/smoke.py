@@ -8,7 +8,8 @@ what each real source returned. Besides the audited transaction and its signer's
 normalizes a few of the latest transactions of pump.fun, PumpSwap and Jupiter, so a venue upgrade that the
 normalizer no longer understands shows up here. The default database is a temporary SQLite file; `--database-url`
 adds one wallet and its transactions to the database given. Exit code 1 when a required check fails; optional
-checks (current quotes, pool candles, Jito tip accounts) are reported without failing the run.
+checks (current quotes, pool candles, trades against GeckoTerminal's parser, the venues' program ids and Jito tip
+accounts) are reported without failing the run.
 """
 
 import argparse
@@ -22,6 +23,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from .adapters.solana import ProviderError, digest, observe
+from .crosscheck import crosscheck, venue_programs
 from .main import create_app
 from .migrate import current_revision, head_revision
 from .normalize import JITO_TIP_ACCOUNTS, NORMALIZER_VERSION, VENUES, WSOL, normalize
@@ -249,6 +251,20 @@ def run(rpc, prices, quotes, history, jito=jito_tip_accounts, *, db_url: str, si
             return result
         raise AssertionError(f"ningún pool para {len(mints[:5])} tokens operados")
 
+    def trades_vs_geckoterminal():
+        """A few trending pools: GeckoTerminal's parsed trades against our normalization (tracker.crosscheck)."""
+        result = crosscheck(rpc, history, pages=1, per_pool=3, max_pools=3)
+        assert result["trades"], "GeckoTerminal no devolvió operaciones que comparar"
+        assert not result["disagreements"], f"discrepancias con GeckoTerminal: {result['disagreements']}"
+        return {k: result[k] for k in ("trades", "outcomes", "agreement", "relayed", "quote_diff_abs")}
+
+    def venue_program_ids():
+        """Every recognized pool program still owns the pools GeckoTerminal lists for its DEX."""
+        venues = venue_programs(rpc, history, per_dex=10)
+        wrong = {dex: v["owners"] for dex, v in venues.items() if not v["ok"]}
+        assert not wrong, f"pools con otro programa: {wrong}"
+        return {"dexes": len(venues), "pools": sum(v["pools"] for v in venues.values())}
+
     def jito_accounts():
         live = set(jito())
         assert live, "getTipAccounts devolvió una lista vacía"
@@ -268,6 +284,8 @@ def run(rpc, prices, quotes, history, jito=jito_tip_accounts, *, db_url: str, si
         check("analysis_and_ranking", True, analysis)
         check("current_quotes", False, current_quotes)
         check("pool_candles", False, pool_candles)
+        check("trades_vs_geckoterminal", False, trades_vs_geckoterminal)
+        check("venue_program_ids", False, venue_program_ids)
         check("jito_tip_accounts", False, jito_accounts)
     finally:
         if "client" in ctx:

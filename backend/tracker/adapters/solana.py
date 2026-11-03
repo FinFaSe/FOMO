@@ -3,6 +3,7 @@ import json
 import os
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
 from urllib.parse import urlsplit
 
@@ -20,53 +21,101 @@ def digest(payload: dict) -> str:
 
 
 class SolanaRPC:
-    """Documented JSON-RPC only. Bounded retries, finalized reads, no credentials in logs."""
+    """Documented JSON-RPC only. Bounded retries, finalized reads, no credentials in logs.
+
+    Request starts are spaced by SOLANA_RPC_MIN_INTERVAL seconds (default 0.3, under the public endpoint's
+    per-method limit) across threads, but a slow response no longer blocks the next request: historical
+    getTransaction calls take ~3 s on the public RPC, so `transactions()` keeps up to SOLANA_RPC_CONCURRENCY
+    (default 6) in flight. Raise both with a paid provider. The spacing adapts: a rate-limit answer doubles it
+    for every thread at once (and honors Retry-After), each success relaxes it back toward the minimum.
+    """
+
+    attempts = 5
+    max_interval = 5.0
 
     chain = "solana"
 
-    def __init__(self, endpoint: str | None = None, client: httpx.Client | None = None):
+    def __init__(self, endpoint: str | None = None, client: httpx.Client | None = None, *,
+                 min_interval: float | None = None, concurrency: int | None = None):
         self.endpoint = endpoint or os.getenv("SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
         parsed = urlsplit(self.endpoint)
         if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
             raise ValueError("SOLANA_RPC_URL requiere HTTPS sin credenciales en userinfo")
         self.source = "https://" + parsed.hostname  # paths and query may contain provider credentials
         self.client = client or httpx.Client(timeout=25, follow_redirects=False, trust_env=True)
+        self.min_interval = (min_interval if min_interval is not None
+                             else float(os.getenv("SOLANA_RPC_MIN_INTERVAL", "0.3")))
+        self.concurrency = max(1, concurrency if concurrency is not None
+                               else int(os.getenv("SOLANA_RPC_CONCURRENCY", "6")))
         self.lock = threading.Lock()
-        self.last_call = 0.0
+        self.interval = self.min_interval  # current spacing, between min_interval and max_interval
+        self.next_slot = 0.0
+        self._full_history: tuple[float, bool] | None = None
+
+    def _wait_turn(self):
+        """Reserve the next request slot; the request itself runs outside the lock."""
+        with self.lock:
+            now = time.monotonic()
+            start = max(now, self.next_slot)
+            self.next_slot = start + self.interval
+        if start > now:
+            time.sleep(start - now)
+
+    def _slow_down(self, retry_after: str | None):
+        """Rate limited: double the spacing for every thread and pause them all (Retry-After if given)."""
+        try:
+            pause = min(10.0, max(0.0, float(retry_after))) if retry_after else 0.0
+        except ValueError:
+            pause = 0.0
+        with self.lock:
+            self.interval = min(self.max_interval, max(self.interval * 2, max(self.min_interval, 0.05) * 2))
+            self.next_slot = max(self.next_slot, time.monotonic() + max(pause, self.interval))
+
+    def _speed_up(self):
+        with self.lock:
+            self.interval = max(self.min_interval, self.interval * 0.95)
 
     def call(self, method: str, params: list):
-        for attempt in range(3):
-            with self.lock:
-                time.sleep(max(0, 0.3 - (time.monotonic() - self.last_call)))
+        for attempt in range(self.attempts):
+            self._wait_turn()
+            try:
+                r = self.client.post(self.endpoint, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
+            except httpx.HTTPError:
+                raise ProviderError("RPC inaccesible; revisa red y configuración del proveedor") from None
+            limited = r.status_code in (429, 502, 503, 504)
+            body = None
+            if r.status_code == 200:
                 try:
-                    r = self.client.post(self.endpoint, json={"jsonrpc": "2.0", "id": 1,
-                                                             "method": method, "params": params})
-                except httpx.HTTPError:
-                    raise ProviderError("RPC inaccesible; revisa red y configuración del proveedor") from None
-                finally:
-                    self.last_call = time.monotonic()
-            if r.status_code in (429, 502, 503, 504):
-                if attempt == 2:
+                    body = r.json()
+                    code = body["error"].get("code") if body.get("error") else None
+                except (ValueError, AttributeError, TypeError):
+                    raise ProviderError("Respuesta RPC inválida") from None
+                limited = code in (429, -32005)
+            if limited:
+                self._slow_down(r.headers.get("retry-after"))
+                if attempt == self.attempts - 1:
                     raise ProviderError("RPC limitado o temporalmente no disponible; ingesta parcial", 503)
-                try:
-                    delay = min(5, max(1, float(r.headers.get("retry-after", "1"))))
-                except ValueError:
-                    delay = 1
-                time.sleep(delay * (attempt + 1))
                 continue
             if r.status_code != 200:
                 raise ProviderError(f"El RPC devolvió HTTP {r.status_code}")
+            self._speed_up()
+            if body.get("error"):
+                raise ProviderError(f"Error JSON-RPC {body['error'].get('code')}; consulta cobertura o límites")
             try:
-                body = r.json()
-                if body.get("error"):
-                    code = body["error"].get("code")
-                    if code in (429, -32005) and attempt < 2:
-                        time.sleep(attempt + 1)
-                        continue
-                    raise ProviderError(f"Error JSON-RPC {code}; consulta cobertura o límites")
                 return body["result"]
-            except (ValueError, KeyError, TypeError):
+            except (KeyError, TypeError):
                 raise ProviderError("Respuesta RPC inválida") from None
+
+    def full_history(self) -> bool:
+        """True when the provider serves the whole ledger (its first available block is the genesis slot).
+
+        Non-archival providers answer signature listings and transactions only for recent days, so a listing
+        that ends there is the provider's horizon, not the wallet's first transaction. Cached for 10 minutes.
+        """
+        now = time.monotonic()
+        if self._full_history is None or now - self._full_history[0] > 600:
+            self._full_history = (now, self.call("getFirstAvailableBlock", []) == 0)
+        return self._full_history[1]
 
     def signatures(self, wallet: str, *, before: str | None = None, until: str | None = None, limit: int = 10):
         opts = {"commitment": "finalized", "limit": limit}
@@ -97,6 +146,20 @@ class SolanaRPC:
         if signature not in result.get("transaction", {}).get("signatures", []):
             raise ProviderError("La firma devuelta por RPC no corresponde a la solicitada")
         return result
+
+    def transactions(self, signatures: list[str]) -> dict[str, dict | ProviderError]:
+        """Several transactions fetched concurrently; each value is the payload or the ProviderError it raised."""
+
+        def one(signature):
+            try:
+                return signature, self.transaction(signature)
+            except ProviderError as exc:
+                return signature, exc
+
+        if not signatures:
+            return {}
+        with ThreadPoolExecutor(max_workers=min(self.concurrency, len(signatures))) as pool:
+            return dict(pool.map(one, signatures))
 
 
 def observe(transaction: dict, wallet: str) -> dict:

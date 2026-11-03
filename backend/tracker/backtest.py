@@ -24,6 +24,7 @@ from sqlalchemy import select
 from .adapters.solana import ProviderError
 from .db import Alert, AlertQuote, EarlyBuy, PricePoint, Trade, Wallet, now_iso
 from .history import candle_index, covering_candle
+from .normalize import fee_sol
 
 ONE = Decimal(1)
 ZERO = Decimal(0)
@@ -101,7 +102,7 @@ def _leader_closed_roi(trades: list[Trade], mints: set[str]) -> Decimal | None:
         d = t.details
         amount = Decimal(d["token_amount"])
         sol = Decimal(d["quote_amount"])
-        fees = Decimal(d.get("network_fee_sol", "0")) + Decimal(d.get("tip_sol", "0"))
+        fees = fee_sol({"network_fee_sol": "0", **d})
         if t.kind == "buy":
             qty[t.mint] += amount
             cost[t.mint] += sol + fees

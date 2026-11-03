@@ -44,6 +44,7 @@ from .history import chart, enqueue_history, history_json
 from .jobs import Worker, cancel, enqueue, ensure_idle, job_json, run_inline, worker_status
 from .portfolio import open_positions
 from .pricing import price_trades
+from .quality import quality
 from .ranking import current_analysis, ranking
 from .schemas import (
     AlertsRead,
@@ -330,6 +331,14 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None, quot
             # Default: as of the last completed sync, served from the precomputed entry when current.
             return current_analysis(s, row, filters)
         return wallet_analysis(s, row, filters, timestamp)
+
+    @app.get("/api/quality")
+    def data_quality(wallet: Annotated[list[str], Query()] = [], days: int = Query(90, ge=1, le=3650),  # noqa: B006
+                     s=Depends(session)):
+        """What the tracker sees and cannot see in the tracked wallets' data (local data only)."""
+        for address_ in wallet:
+            get_wallet(s, address_)
+        return quality(s, wallet or None, days=days)
 
     @app.get("/api/rankings")
     def rankings(filters: Annotated[Filters, Depends()], limit: int = Query(20, ge=1, le=100),

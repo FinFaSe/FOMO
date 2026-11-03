@@ -30,7 +30,7 @@ la posición se marca ambigua. Una ordenación lexicográfica determinista no se
 El MVP admite movimientos finales de token; no pretende normalizar token rebasing, impuestos Token-2022, MEV,
 bundles, migraciones, perps, NFT o rutas complejas sin un adaptador específico.
 
-## Normalización on-chain (`balance-delta-v1`)
+## Normalización on-chain (`balance-delta-v4`)
 
 Cada transacción guardada se convierte en eventos por mint a partir de los cambios netos de la wallet, no de
 decodificar instrucciones, de modo que cualquier ruta por un venue reconocido se normaliza igual.
@@ -42,7 +42,14 @@ decodificar instrucciones, de modo que cualquier ruta por un venue reconocido se
   contrapartida es transferencia. Token por token o varias contrapartidas conservan el inventario pero no el
   precio (`multi_leg_swap_quote_not_allocatable`). Las transacciones fallidas no generan eventos.
 - `verified` exige programa reconocido + firma de la wallet + contrapartida identificada; si no, `inferred`.
-  Verificar la operación no verifica USD ni market cap: siguen `unknown`.
+  Verificar la operación no verifica USD ni market cap: siguen `unknown`. Los programas de pools reconocidos son
+  los dueños de los pools que GeckoTerminal lista para cada DEX (comprobado en la cadena con `getMultipleAccounts`;
+  `tracker.crosscheck --venues` lo repite); los agregadores (Jupiter v6, DFlow) cuentan como venue.
+- Un tramo de SOL de hasta 0,003 junto a una contrapartida en stablecoin es rent devuelto por un relayer o la
+  comisión de un servicio: la stablecoin es la contrapartida y el SOL se suma, con su signo, a las comisiones
+  (`other_sol`; un reembolso las reduce). Un tramo de SOL mayor sigue haciendo la operación no asignable.
+- Un tercio de las operaciones reales muestreadas las paga un relayer (terminales de trading): el trader es el
+  firmante dueño del cambio de tokens, no `accountKeys[0]`. Por eso el descubrimiento normaliza para cada firmante.
 - La fee de red se imputa al primer evento de la transacción. Las fees del venue ya están dentro del importe
   intercambiado (precio efectivo). Propinas (Jito) y rent pagado a cuentas ajenas quedan dentro del costo.
 - Las posiciones en SOL reutilizan el costo promedio ponderado; su ROI difiere del ROI en USD si SOL se movió.
@@ -85,6 +92,9 @@ ejecución, y no forma parte de snapshots ni del ranking.
 pendiente, `covered_from ≤ inicio de ventana`, `caught_up_at ≥ as_of`, sin `blockTime` ausentes y con todas las
 transacciones normalizadas por la versión vigente. `caught_up_at` es el inicio del escaneo menos 120 s, por el
 retraso de `finalized`. Sin `as_of` explícito, el análisis y el ranking usan el `caught_up_at` de cada wallet.
+Que un listado de firmas termine solo prueba el inicio de la wallet si el proveedor guarda todo el historial
+(`getFirstAvailableBlock` = 0); con un proveedor que solo guarda días recientes, la cobertura se queda en la firma
+más antigua listada (`rpc_history_horizon`).
 El ranking y el análisis sin `as_of` se sirven de entradas precalculadas por wallet y filtros. Una entrada es
 válida solo mientras la revisión de análisis de la wallet (que sube con cualquier cambio en sus operaciones,
 eventos o estado de sync) y la versión del método coinciden; si no, se recalcula antes de responder. Por eso

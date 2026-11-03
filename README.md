@@ -105,7 +105,10 @@ La correlación entre tokens aún puede reducir la independencia. Ver [método](
    y el precio efectivo. El tramo SOL suma los lamports de la wallet y de sus cuentas de token
    (así el rent de sus propias cuentas y el wSOL se compensan) y separa la fee de red. Una operación es
    `verified` solo si se ejecutó un programa reconocido (Pump.fun, PumpSwap, Raydium AMM v4/CPMM/CLMM/
-   LaunchLab o Jupiter v6), la wallet firmó y hubo exactamente un token contra una contrapartida.
+   LaunchLab, Orca Whirlpools, Meteora DLMM/DAMM v2/DBC, FluxBeam, boop.fun, Byreal, Manifest, ZeroFi, o los
+   agregadores Jupiter v6 y DFlow), la wallet firmó y hubo exactamente un token contra una contrapartida. Un
+   tramo de SOL de hasta 0,003 junto a una contrapartida en stablecoin (reembolso de rent de un relayer o
+   comisión de un servicio) se cuenta como comisión (`other_sol`), no como segunda contrapartida.
    Tras cada sync, las compras y ventas se valoran en USD (`tracker/pricing.py`): importe en SOL × SOL/USD
    de la vela de 1 minuto de Coinbase que contiene el bloque (o la más cercana a ≤5 min); USDC y USDT a la
    par. El market cap de entrada solo es `verified` para mints de pump.fun (su origen lo prueba cualquier
@@ -228,8 +231,15 @@ Campos opcionales `fdv_usd` y `liquidity_usd` se conservan como declaraciones, s
 
 ## Fuentes y credenciales
 
-El RPC público funciona sin clave. Alternativamente configura `SOLANA_RPC_URL` con un proveedor HTTPS
-de archivo autorizado. Los límites y la retención del proveedor condicionan la cobertura.
+El RPC público funciona sin clave, pero limita mucho: en la validación del 3 de noviembre de 2026 respondió
+429 a una de cada dos peticiones incluso a una cada 4 s, y tarda ~3 s por transacción antigua. Para historiales
+de 90 días configura `SOLANA_RPC_URL` con un proveedor HTTPS **de archivo** (historial completo). El tracker lo
+comprueba: si el primer bloque disponible del proveedor no es el 0 (`getFirstAvailableBlock`), el final de un
+listado de firmas es el horizonte del proveedor y no el inicio de la wallet, así que la sync queda parcial con
+`rpc_history_horizon` en vez de dar el historial por completo. Las transacciones de cada página se descargan en
+paralelo (`SOLANA_RPC_CONCURRENCY`, 6) con un espaciado entre peticiones (`SOLANA_RPC_MIN_INTERVAL`, 0,3 s) que se
+duplica para todos los hilos ante un 429 y se relaja con cada respuesta correcta; una ronda que guardó progreso
+antes de toparse con el límite no cuenta como intento fallido.
 
 `fomoapi.io` es **independiente, no oficial**. El adaptador implementa solamente el método documentado
 `GET /v2/users/{handle}` para resolver candidatos. Requiere `FOMO_API_KEY` solo en el backend.
@@ -262,7 +272,8 @@ Variables opcionales:
 | Nombre | Uso |
 | --- | --- |
 | `DATABASE_URL` | Por defecto SQLite; PostgreSQL usa `postgresql+psycopg://…` |
-| `SOLANA_RPC_URL` | RPC HTTPS, por defecto `https://api.mainnet-beta.solana.com` |
+| `SOLANA_RPC_URL` | RPC HTTPS, por defecto `https://api.mainnet-beta.solana.com` (debe ser de archivo) |
+| `SOLANA_RPC_CONCURRENCY` / `SOLANA_RPC_MIN_INTERVAL` | Descargas simultáneas (6) y espaciado mínimo entre peticiones en s (0,3) |
 | (sin variable) | Precios: `https://api.exchange.coinbase.com`, público y sin clave |
 | (sin variable) | Cotizaciones actuales: `https://api.dexscreener.com`, público y sin clave |
 | (sin variable) | Velas de pool: `https://api.geckoterminal.com`, público y sin clave (30/min) |
@@ -283,6 +294,21 @@ La aplicación está diseñada para desarrollo local de un solo investigador. El
 autenticación de usuarios: no exponerlo públicamente sin añadir login, autorización, TLS y límites por usuario.
 Ejecutar FastAPI con un solo proceso y un único worker de fondo: el bloqueo de escrituras y el limitador
 RPC son locales a cada proceso. Con SQLite, API y worker comparten el archivo en modo WAL con espera de bloqueo.
+
+## Calidad de los datos y contraste con otra fuente
+
+`GET /api/quality` (o `python -m tracker.quality [WALLET…]`) resume, sin red, qué ve el tracker de las wallets
+seguidas: cobertura de la ventana, operaciones `verified`/`inferred` y por qué, contrapartidas y venues, cuántas
+compras/ventas tienen USD y market cap verificado, los programas no reconocidos que mueven sus tokens (candidatos a
+venue) y por qué las posiciones y las wallets no llegan al ranking.
+
+`python -m tracker.crosscheck [--pages N] [--per-pool N] [--venues]` compara el normalizador con el parser de
+GeckoTerminal sobre las mismas transacciones reales: toma operaciones de pools en tendencia, descarga cada
+transacción y la normaliza para el firmante dueño del cambio de tokens. Clasifica cada una como `agree` (mismo
+lado y exactamente la misma cantidad), `split_route`, `not_trader`, `unverified` o `disagree` (lista cada caso), y
+mide la diferencia de importe (la nuestra incluye las comisiones que paga la wallet). `--venues` comprueba que cada
+programa reconocido sea el dueño de los pools que GeckoTerminal lista para su DEX. El smoke test hace una versión
+corta de ambas.
 
 ## Pruebas y compilación
 

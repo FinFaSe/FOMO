@@ -199,3 +199,30 @@ def test_embedded_worker_thread(tmp_path, monkeypatch):
 def test_job_request_validation(client, payload):  # noqa: F811
     c, _ = client
     assert c.post(QUEUE, json=payload).status_code == 422
+
+
+def test_rounds_that_store_progress_are_not_failed_attempts(client, monkeypatch):  # noqa: F811
+    """A long history on a rate-limited RPC: every round stores some transactions and then fails."""
+    c, rpc = client
+    monkeypatch.setattr(jobs_module, "MAX_ATTEMPTS", 2)
+    sigs = recent(rpc, 6)
+    original, served = rpc.transaction, []
+
+    def limited(signature):
+        if len(served) % 2 == 1 and signature not in served:
+            served.append(None)  # every other new download is refused
+            raise jobs_module.ProviderError("Synthetic rate limit", 503)
+        served.append(signature)
+        return original(signature)
+
+    rpc.transaction = limited
+    job_id = c.post(QUEUE, json={}).json()["job"]["id"]
+    w = worker(c, rpc)
+    for _ in range(12):
+        set_job(c, job_id, run_after=datetime.now(timezone.utc).isoformat())
+        w.run_once()
+        if c.get(f"/api/jobs/{job_id}").json()["state"] != "queued":
+            break
+    job = c.get(f"/api/jobs/{job_id}").json()
+    assert job["state"] == "done" and observations(c) == 6  # far more rounds than MAX_ATTEMPTS, never failed
+    assert sorted(s for s in served if s) == sorted(sigs)

@@ -21,7 +21,9 @@ proceeds. Venue fees are already inside the swapped amount, i.e. prices are effe
 
 from decimal import Decimal
 
-NORMALIZER_VERSION = "balance-delta-v3"  # v2: token decimals per event; v3: Jito tips split from the swap
+NORMALIZER_VERSION = "balance-delta-v4"  # v2: token decimals per event; v3: Jito tips split from the swap;
+# v4: Orca, Meteora, FluxBeam, boop.fun, Byreal, Manifest, ZeroFi and DFlow recognized as venues, and a small SOL
+# leg next to a stablecoin quote counted as a fee (`other_sol`) instead of making the trade unallocatable
 # Jito's eight tip accounts, as the block engine's getTipAccounts returns them (re-checked by tracker.smoke). A tip
 # is a cost of getting the trade landed, not part of the swapped amount: it is reported next to the network fee so
 # the effective price is not inflated by it.
@@ -32,11 +34,16 @@ JITO_TIP_ACCOUNTS = frozenset({
     "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL", "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
 })
 LAMPORTS = Decimal(10) ** 9
+# A SOL leg this small next to a stablecoin leg is rent or a service fee, not a second quote (ATA rent is
+# 0.00203928 SOL).
+SOL_DUST = Decimal("0.003")
 WSOL = "So11111111111111111111111111111111111111112"
 STABLES = {"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "USDC",
            "Es9vMFrzaCERmJfrF4H2FYD4KLNRFeaDs3YdGBWbhTRc": "USDT"}
-# Mainnet program IDs from each project's documentation/SDK. A router counts as a venue because the
-# balance-delta method does not depend on which pools it touched.
+# Mainnet program IDs. A router counts as a venue because the balance-delta method does not depend on which
+# pools it touched. Pool programs are checked on-chain: each one owns every pool GeckoTerminal lists for that
+# DEX (getMultipleAccounts; `python -m tracker.smoke` repeats the check, see GECKO_DEXES). The first seven come
+# from each project's documentation/SDK; DFlow's from its IDL-generated decoder and indexer documentation.
 VENUES = {
     "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P": "pump.fun",
     "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA": "pumpswap",
@@ -45,6 +52,24 @@ VENUES = {
     "CAMMCzo5YL8w4VFF8KVHrK22GGUsp5VTaW7grrKgrWqK": "raydium-clmm",
     "LanMV9sAd7wArD4vJFi2qDdfnVhFxYSUg6eADduJ3uj": "raydium-launchlab",
     "JUP6LkbZbjS1jKKwapdHNy74zcZ3tLUZoi5QNyVTaV4": "jupiter-v6",
+    "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc": "orca-whirlpool",
+    "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo": "meteora-dlmm",
+    "cpamdpZCGKUy5JxQXB4dcpGPiikHawvSWAd6mEn1sGG": "meteora-damm-v2",
+    "dbcij3LWUppWqq96dh6gJWwBifmcGfLSB5D4DuSMaqN": "meteora-dbc",
+    "FLUXubRmkEi2q6K3Y9kBPg9248ggaZVsoSFhtJHSrm1X": "fluxbeam",
+    "boop8hVGQGqehUK2iVEMEnMrL5RbjywRzHKBmBE7ry4": "boop-fun",
+    "REALQqNEomY6cQGZJUGwywTBD2UmDT32rZcNnfxQ5N2": "byreal",
+    "MNFSTqtC93rEfYHB6hF82sKdZpUDFWkViLByLd1k1Ms": "manifest",
+    "ZERor4xhbUycZ6gb9ntrhqscUcZmAbQDjEAtCf4hbZY": "zerofi",
+    "DF1ow4tspfHX9JwWJsAb9epbkA8hmpSEAtxXy1V27QBH": "dflow-aggregator-v4",
+}
+# GeckoTerminal DEX id -> venues whose program must own that DEX's pools (routers have no pools).
+GECKO_DEXES = {
+    "pump-fun": {"pump.fun"}, "pumpswap": {"pumpswap"}, "raydium": {"raydium-amm-v4", "raydium-cpmm"},
+    "raydium-clmm": {"raydium-clmm"}, "raydium-launchlab": {"raydium-launchlab"}, "orca": {"orca-whirlpool"},
+    "meteora": {"meteora-dlmm"}, "meteora-damm-v2": {"meteora-damm-v2"}, "meteora-dbc": {"meteora-dbc"},
+    "fluxbeam": {"fluxbeam"}, "boop-fun": {"boop-fun"}, "byreal": {"byreal"}, "manifest": {"manifest"},
+    "zerofi": {"zerofi"},
 }
 
 
@@ -125,6 +150,13 @@ def normalize(transaction: dict, wallet: str) -> list[dict]:
         opposite = [(asset, amount) for asset, amount in quotes if (amount < 0) != (delta < 0)]
         issues = []
         quote_asset = quote_amount = None
+        other_sol = Decimal(0)
+        if single and len(opposite) == 2 and any(a == "SOL" and abs(v) <= SOL_DUST for a, v in opposite):
+            # A stablecoin trade plus a few thousandths of SOL (a relayer's rent refund or a service fee):
+            # the stablecoin is the quote; the SOL is kept as a signed cost next to the fees.
+            other_sol = -next(v for a, v in opposite if a == "SOL")
+            opposite = [(a, v) for a, v in opposite if a != "SOL"]
+            issues.append("small_sol_leg_counted_as_fee")
         if single and len(opposite) == 1:
             quote_asset, quote_amount = opposite[0][0], abs(opposite[0][1])
             kind = "buy" if delta > 0 else "sell"
@@ -154,6 +186,14 @@ def normalize(transaction: dict, wallet: str) -> list[dict]:
             # The network fee is charged once per transaction; attach it to the first event only.
             "network_fee_sol": leg["network_fee_sol"] if index == 0 else Decimal(0),
             "tip_sol": leg["tip_sol"] if index == 0 else Decimal(0),
+            "other_sol": other_sol,
             "venues": venues, "trade": trade, "issues": issues,
         })
     return events
+
+
+def fee_sol(details: dict) -> Decimal:
+    """Costs outside the swapped amount, in SOL: network fee, Jito tip and any small SOL leg set aside
+    (negative when it was a refund to the wallet)."""
+    return (Decimal(details["network_fee_sol"]) + Decimal(details.get("tip_sol", "0"))
+            + Decimal(details.get("other_sol", "0")))

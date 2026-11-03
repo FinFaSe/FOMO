@@ -144,3 +144,23 @@ def test_revalidation_does_not_move_cursors(client):
     # The incremental scan still resumes from its own cursor; the third payload is not re-downloaded.
     after = c.post(SYNC, json={}).json()
     assert after["state"] == "scanned" and after["rpc_transaction_fetches"] == 0
+
+
+def test_a_provider_without_full_history_never_completes_the_window(client):
+    """A non-archival RPC lists only recent days: the end of its listing is its horizon, not the wallet's start."""
+    c, rpc = client
+    recent(rpc, 2)
+    rpc.full_history = lambda: False
+    report = c.post(SYNC, json={}).json()
+    assert report["transactions"] == 2 and report["state"] == "partial"
+    assert "rpc_history_horizon" in report["issues"] and not report["coverage"]["history_start_reached"]
+    assert not c.get(f"/api/wallets/{WALLET}/analysis").json()["history_complete"]
+
+    def unavailable():
+        raise ProviderError("Synthetic: method not found", 502)
+
+    rpc.full_history = unavailable
+    assert "rpc_history_unverified" in c.post(SYNC, json={}).json()["issues"]
+    rpc.full_history = lambda: True  # an archival provider confirms the start
+    final = c.post(SYNC, json={}).json()
+    assert final["state"] == "scanned" and final["coverage"]["history_start_reached"]

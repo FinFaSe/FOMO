@@ -4,7 +4,11 @@ Third-party market data, stored and labeled as such (source `geckoterminal`), ne
 - GET /networks/solana/tokens/{mint}/pools: pools of a token; the deepest one where the mint is the base token.
 - GET /networks/solana/pools/{pool}/ohlcv/{minute|hour|day}?aggregate=1&before_timestamp=…&limit=…&currency=token
   returns [timestamp, open, high, low, close, volume] rows, newest first; `currency=token` prices the base token in
-  the pool's quote token (SOL for SOL pairs). Intervals without trades are absent.
+  the pool's quote token (SOL for SOL pairs; confirmed on 2026-11-03 against DEX Screener, ratio 0.996). Intervals
+  without trades are absent.
+- GET /networks/solana/pools/{pool}/trades: the pool's last 300 trades of the past day, parsed by GeckoTerminal
+  (transaction, signer, side, amounts). Used to cross-check our normalizer (tracker.crosscheck).
+- GET /networks/solana/trending_pools and /networks/solana/dexes/{dex}/pools: pool samples per DEX.
 """
 
 import json
@@ -105,3 +109,35 @@ class GeckoTerminal:
             out.append({"ts": ts, "open": values[0], "high": values[1], "low": values[2], "close": values[3],
                         "volume": _decimal(row[5]) if len(row) > 5 else None})
         return sorted(out, key=lambda c: c["ts"])
+
+    def trending_pools(self, page: int = 1) -> list[dict]:
+        body = self._get(f"/networks/{self.network}/trending_pools", {"page": page, "include": "dex"})
+        out = []
+        for pool in (body or {}).get("data") or []:
+            attributes, relations = pool.get("attributes") or {}, pool.get("relationships") or {}
+            dex = ((relations.get("dex") or {}).get("data") or {}).get("id")
+            if attributes.get("address") and dex:
+                out.append({"pool": attributes["address"], "dex": dex, "name": attributes.get("name")})
+        return out
+
+    def dex_pools(self, dex: str, page: int = 1) -> list[str]:
+        body = self._get(f"/networks/{self.network}/dexes/{dex}/pools", {"page": page})
+        return [p["attributes"]["address"] for p in (body or {}).get("data") or []
+                if isinstance((p.get("attributes") or {}).get("address"), str)]
+
+    def pool_trades(self, pool: str) -> list[dict]:
+        """GeckoTerminal's parsed trades of a pool (last day, at most 300); malformed or anomalous rows dropped."""
+        body = self._get(f"/networks/{self.network}/pools/{pool}/trades")
+        out = []
+        for row in (body or {}).get("data") or []:
+            a = row.get("attributes") or {}
+            amounts = [_decimal(a.get("from_token_amount")), _decimal(a.get("to_token_amount"))]
+            texts = [a.get(k) for k in ("tx_hash", "tx_from_address", "from_token_address", "to_token_address")]
+            if a.get("is_anomalous") or a.get("kind") not in ("buy", "sell") or None in amounts \
+                    or not all(isinstance(t, str) and t for t in texts) or min(amounts) <= 0:
+                continue
+            out.append({"tx": a["tx_hash"], "signer": a["tx_from_address"], "kind": a["kind"],
+                        "from_token": a["from_token_address"], "to_token": a["to_token_address"],
+                        "from_amount": amounts[0], "to_amount": amounts[1],
+                        "volume_usd": _decimal(a.get("volume_in_usd")), "block_time": a.get("block_timestamp")})
+        return out
