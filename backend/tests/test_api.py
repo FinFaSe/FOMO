@@ -3,6 +3,7 @@
 import copy
 import json
 from concurrent.futures import ThreadPoolExecutor
+from decimal import Decimal
 
 import httpx
 import pytest
@@ -73,10 +74,26 @@ class SyntheticRPC:
         return sig
 
 
+class SyntheticPrices:
+    """SYNTHETIC SOL/USD candles: a constant price unless a minute is listed in `gaps`."""
+
+    source = "https://synthetic-prices.example.org"
+    symbol = "SOL-USD"
+
+    def __init__(self, close="150"):
+        self.close, self.gaps, self.calls = close, set(), []
+
+    def minute_candles(self, start, end):
+        self.calls.append((start, end))
+        return [{"minute": m, "open": Decimal(self.close), "high": Decimal(self.close) + 1,
+                 "low": Decimal(self.close) - 1, "close": Decimal(self.close)}
+                for m in range(start - start % 60, end, 60) if m >= start and m not in self.gaps]
+
+
 @pytest.fixture
 def client(tmp_path):
     rpc = SyntheticRPC()
-    app = create_app(f"sqlite:///{tmp_path}/test.db", rpc=rpc)
+    app = create_app(f"sqlite:///{tmp_path}/test.db", rpc=rpc, prices=SyntheticPrices())
     with TestClient(app) as c:
         c.post("/api/wallets", json={"address": WALLET, "label": "SYNTHETIC TEST"})
         yield c, rpc
@@ -230,7 +247,7 @@ def test_fomo_key_stays_server_side_and_upstream_report_is_not_proof(tmp_path, m
         return httpx.Response(200, json={"wallets": {"solana": WALLET}, "pnlUsd": 999999})
 
     fomo = FomoAPI(httpx.Client(transport=httpx.MockTransport(transport)))
-    app = create_app(f"sqlite:///{tmp_path}/fomo.db", rpc=SyntheticRPC(), fomo=fomo)
+    app = create_app(f"sqlite:///{tmp_path}/fomo.db", rpc=SyntheticRPC(), fomo=fomo, prices=SyntheticPrices())
     with TestClient(app) as c:
         w = c.post("/api/integrations/fomo/resolve", json={"handle": "@test_user"}).json()
         assert w["identity"]["verification"] == "provider_reported_not_independently_verified"

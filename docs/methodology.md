@@ -44,6 +44,25 @@ decodificar instrucciones, de modo que cualquier ruta por un venue reconocido se
 - Las posiciones en SOL reutilizan el costo promedio ponderado; su ROI difiere del ROI en USD si SOL se movió.
   El win rate de esa vista es por posición, sin agrupar por token: es exploratorio.
 
+## Valoración USD y market cap de entrada
+
+- SOL/USD = cierre de la vela de 1 minuto de Coinbase Exchange (`SOL-USD`) que contiene el `blockTime`; si ese
+  minuto no tuvo operaciones, la vela más cercana a ≤5 minutos (se registra el desfase). Se guardan `low`/`high`
+  como banda de incertidumbre. Sin vela cercana la operación queda `unpriced` y su posición no es evaluable.
+- `gross_usd` = contrapartida × SOL/USD (o la cantidad de USDC/USDT, a la par); `fees_usd` = fee de red × SOL/USD.
+- Market cap = precio USD por token × límite superior de suministro. Solo se marca `verified` para mints con una
+  operación guardada contra la bonding curve de pump.fun (prueba de origen) y 6 decimales: se crean con
+  1.000.000.000 tokens y sin autoridad de emisión, y las quemas solo reducen el suministro, así que el market cap
+  nunca queda subestimado frente al filtro de market cap máximo. El resto de mints queda `unknown`.
+- Pyth Benchmarks no se usa: su endpoint público TradingView se retiró el 26 de agosto de 2026.
+
+## Historial completo
+
+`history_complete` es verdadero solo si el escaneo incremental cubre `[as_of − días, as_of]`: sin catch-up
+pendiente, `covered_from ≤ inicio de ventana`, `caught_up_at ≥ as_of`, sin `blockTime` ausentes y con todas las
+transacciones normalizadas por la versión vigente. `caught_up_at` es el inicio del escaneo menos 120 s, por el
+retraso de `finalized`. Sin `as_of` explícito, el análisis y el ranking usan el `caught_up_at` de cada wallet.
+
 ## Muestra y consistencia
 
 El win rate observado es `ciclos con PnL > 0 / ciclos cerrados evaluables`; break-even permanece en el denominador.

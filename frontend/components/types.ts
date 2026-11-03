@@ -46,12 +46,15 @@ export type Observation = {
 };
 export type Config = {
   default_filters: Filters; fomo_api_configured: boolean; rpc_source: string; data_mode: string;
+  price_source: string | null;
 };
 export type ChainTrade = {
   signature: string; event_index: number; mint: string; kind: string; block_time: number | null;
   token_amount: string; quote_asset: string | null; quote_amount: string | null; price: string | null;
   network_fee_sol: string; venues: string[]; issues: string[]; transaction_url: string;
   evidence: { trade: string; usd: string; market_cap: string };
+  usd?: { gross_usd: string | null; price_usd: string | null; sol_usd: string | null;
+    market_cap_usd: string | null; market_cap_method: string | null; quote_method: string };
 };
 export type ChainPosition = {
   token: string; cycle: number; status: string; opened_at: string; closed_at: string | null;

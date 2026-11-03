@@ -7,6 +7,7 @@ from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
 from tracker.db import SyncState, Trade
+from tracker.normalize import NORMALIZER_VERSION
 
 from .conftest import TOKEN, WALLET, b58
 from .test_incremental_sync import client  # noqa: F401  (fixture)
@@ -40,7 +41,7 @@ def test_sync_normalizes_swaps_and_rebuilds_sol_positions(client):  # noqa: F811
     sell, buy = trades["items"]  # newest first
     assert (buy["kind"], buy["quote_asset"], buy["quote_amount"]) == ("buy", "SOL", "1")
     assert (sell["kind"], sell["quote_amount"], sell["venues"]) == ("sell", "1.5", ["pump.fun"])
-    assert buy["evidence"]["trade"] == "verified" and buy["evidence"]["usd"] == "unknown"
+    assert buy["evidence"]["trade"] == "verified"
     assert c.get(f"/api/wallets/{WALLET}/trades?mint={TOKEN}").json()["total"] == 2
     assert c.get(f"/api/wallets/{WALLET}/trades?mint=nope").status_code == 422
 
@@ -55,9 +56,33 @@ def test_sync_normalizes_swaps_and_rebuilds_sol_positions(client):  # noqa: F811
     assert Decimal(p["avg_entry_price_sol"]) == Decimal(1) / Decimal(3_500_000)
     summary = positions["summary"]
     assert summary["wins"] == 1 and summary["win_rate"] == 1 and summary["evaluable_positions"] == 1
-    # Chain trades never feed the validated USD ranking.
+
+
+def test_sync_values_trades_in_usd_and_feeds_the_usd_analysis(client):  # noqa: F811
+    c, rpc = client
+    round_trip(rpc)
+    report = c.post(SYNC, json={})
+    report = report.json()
+    assert report["pricing"]["priced"] == 2 and report["pricing"]["market_caps"] == 2
+    sell, buy = c.get(f"/api/wallets/{WALLET}/trades").json()["items"]
+    fee = Decimal("0.000105")
+    assert buy["evidence"]["usd"] == "verified" and buy["evidence"]["market_cap"] == "verified"
+    assert Decimal(buy["usd"]["gross_usd"]) == 150 and Decimal(buy["usd"]["fees_usd"]) == fee * 150
+    assert buy["usd"]["sol_usd"] == "150" and buy["usd"]["sol_usd_range"] == ["149", "151"]
+    # pump.fun mint: fixed 1e9 supply upper bound × USD price per token.
+    assert Decimal(buy["usd"]["market_cap_usd"]) == Decimal(150) / Decimal(3_500_000) * 10 ** 9
+    assert buy["usd"]["market_cap_method"] == "pumpfun_fixed_supply_upper_bound"
+    assert Decimal(sell["usd"]["gross_usd"]) == Decimal("225")
+
+    analysis = c.get(f"/api/wallets/{WALLET}/analysis").json()
+    [p] = analysis["positions"]
+    assert p["evaluable"] and p["verified"] and p["market_cap_verified"] and p["early_entry_reported"]
+    assert Decimal(p["realized_pnl_usd"]) == Decimal(75) - 2 * fee * 150
+    assert analysis["history_complete"] and "incomplete_history" not in analysis["exclusion_reasons"]
+    assert "unverified_trades_usd_or_historical_market_cap" not in analysis["exclusion_reasons"]
+    # One position is far from the 30 required: still not eligible.
+    assert not analysis["eligible"] and "insufficient_evaluable_positions" in analysis["exclusion_reasons"]
     assert c.get("/api/rankings").json()["total"] == 0
-    assert c.get(f"/api/wallets/{WALLET}/analysis").json()["positions"] == []
 
 
 def test_renormalize_uses_stored_evidence_only(client):  # noqa: F811
@@ -65,9 +90,13 @@ def test_renormalize_uses_stored_evidence_only(client):  # noqa: F811
     round_trip(rpc)
     c.post(SYNC, json={})
     fetched = len(rpc.fetches)
+    prices = c.app.state.prices
+    calls = len(prices.calls)
     rebuilt = c.post(f"/api/wallets/{WALLET}/normalize").json()
-    assert rebuilt == {"transactions": 2, "trades": 2, "normalizer": "balance-delta-v1", "rpc_calls": 0}
-    assert len(rpc.fetches) == fetched
+    assert rebuilt["trades"] == 2 and rebuilt["normalizer"] == NORMALIZER_VERSION and rebuilt["rpc_calls"] == 0
+    # Rebuilt trades are re-valued from cached candles: no RPC and no price request.
+    assert rebuilt["pricing"]["priced"] == 2 and rebuilt["pricing"]["price_requests"] == 0
+    assert len(rpc.fetches) == fetched and len(prices.calls) == calls
     assert c.get(f"/api/wallets/{WALLET}/trades").json()["total"] == 2
 
 

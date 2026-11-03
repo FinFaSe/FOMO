@@ -64,10 +64,18 @@ La correlación entre tokens aún puede reducir la independencia. Ver [método](
    (así el rent de sus propias cuentas y el wSOL se compensan) y separa la fee de red. Una operación es
    `verified` solo si se ejecutó un programa reconocido (Pump.fun, PumpSwap, Raydium AMM v4/CPMM/CLMM/
    LaunchLab o Jupiter v6), la wallet firmó y hubo exactamente un token contra una contrapartida.
-   Las posiciones en SOL (`GET /api/wallets/{wallet}/chain-positions`) son exploratorias: sin USD ni
-   market cap histórico no alimentan el ranking. `POST /api/wallets/{wallet}/normalize` las reconstruye
-   desde la evidencia guardada; al cambiar la versión del normalizador se reconstruyen en la siguiente sync.
-4. Importa un ledger JSON documentado mediante el perfil para reconstruir posiciones en USD.
+   Tras cada sync, las compras y ventas se valoran en USD (`tracker/pricing.py`): importe en SOL × SOL/USD
+   de la vela de 1 minuto de Coinbase que contiene el bloque (o la más cercana a ≤5 min); USDC y USDT a la
+   par. El market cap de entrada solo es `verified` para mints de pump.fun (su origen lo prueba cualquier
+   operación guardada contra la bonding curve): precio USD × 1.000 millones, el suministro fijo con que se
+   crean, que es un límite superior porque las quemas solo lo reducen. Otros mints quedan `unknown`.
+   Las velas se guardan en caché; `POST /api/wallets/{wallet}/price` completa lo pendiente (máx. 20
+   peticiones por llamada). Estas operaciones alimentan el análisis en USD y el ranking. La vista en SOL
+   (`GET /api/wallets/{wallet}/chain-positions`) sigue disponible. `POST /api/wallets/{wallet}/normalize`
+   reconstruye las operaciones desde la evidencia guardada; al cambiar la versión del normalizador se
+   reconstruyen en la siguiente sync.
+4. Opcional: importa un ledger JSON documentado. Si la cadena ya aporta el evento de la misma firma y mint,
+   prevalece el de la cadena.
    La importación es una declaración externa, **no** evidencia verificada por sí misma.
 5. **Verificar ledger** comprueba fecha y delta neto del token contra el RPC. No valida
    automáticamente que fuera un swap ni sus precios históricos USD o capitalización.
@@ -110,8 +118,10 @@ créditos ni permisos. No se ha probado una llamada autenticada sin una clave re
 
 La documentación del proveedor declara historial incompleto (`complete: false`) y PnL no reconciliado.
 Por ello **ningún dato importado o identidad declarada se convierte automáticamente en un trader validado**.
-El ranking puede estar vacío: esta fase todavía no incluye el enriquecimiento histórico y la normalización
-completa necesarios para habilitarlo. No significa que no existan traders rentables.
+El ranking exige historial completo de la ventana: el análisis se calcula a la fecha del último escaneo
+completo (`caught_up_at`) y la sync debe cubrir al menos los días de la ventana analizada. Hoy solo las
+entradas en mints de pump.fun tienen market cap verificado; el resto deja la wallet fuera del ranking.
+Un ranking vacío no significa que no existan traders rentables.
 Ver [auditoría y fuentes](docs/audit.md) y [alcance pendiente](docs/roadmap.md).
 
 Variables opcionales:
@@ -120,6 +130,7 @@ Variables opcionales:
 | --- | --- |
 | `DATABASE_URL` | Por defecto SQLite; PostgreSQL usa `postgresql+psycopg://…` |
 | `SOLANA_RPC_URL` | RPC HTTPS, por defecto `https://api.mainnet-beta.solana.com` |
+| (sin variable) | Precios: `https://api.exchange.coinbase.com`, público y sin clave |
 | `FOMO_API_KEY` | Bearer para `api.fomoapi.io`, solo servidor |
 | `BACKEND_URL` | En Next, por defecto `http://127.0.0.1:8000` |
 | `TRACKER_ACCESS_TOKEN` | Opcional: protege la API; Next lo adjunta del lado servidor |

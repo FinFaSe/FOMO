@@ -43,7 +43,7 @@ def store_trades(session, wallet: str, raw: RawTransaction) -> int:
 
     events = normalize(raw.payload, wallet)
     for e in events:
-        details = {"token_amount": str(e["token_amount"]), "quote_asset": e["quote_asset"],
+        details = {"token_amount": str(e["token_amount"]), "decimals": e["decimals"], "quote_asset": e["quote_asset"],
                    "quote_amount": _text(e["quote_amount"]), "price": _text(e["price"]),
                    "network_fee_sol": str(e["network_fee_sol"]), "venues": e["venues"], "issues": e["issues"],
                    "evidence": {"trade": e["trade"], "usd": "unknown", "market_cap": "unknown",
@@ -210,6 +210,9 @@ def _coverage(state: SyncState | None) -> dict | None:
             "missing_block_times": state.missing_block_times, "updated_at": state.updated_at}
 
 
+FINALIZATION_MARGIN = timedelta(seconds=120)
+
+
 def ingest(session, wallet: Wallet, rpc, request: SyncRequest) -> dict:
     """Incremental scan: catch up on signatures newer than head, then backfill below tail.
 
@@ -229,6 +232,8 @@ def ingest(session, wallet: Wallet, rpc, request: SyncRequest) -> dict:
     session.commit()
     budget = [request.max_pages]
     state = None
+    # Listings use `finalized`, which lags the cluster by seconds; leave a margin before claiming coverage.
+    listed_through = (datetime.now(timezone.utc) - FINALIZATION_MARGIN).replace(microsecond=0).isoformat()
     try:
         if request.revalidate:
             complete = _revalidate(session, wallet, rpc, request, report, budget, since)
@@ -251,6 +256,12 @@ def ingest(session, wallet: Wallet, rpc, request: SyncRequest) -> dict:
             complete = caught_up and backfilled and state.missing_block_times == 0
             if caught_up and backfilled and state.missing_block_times and "missing_block_time" not in report["issues"]:
                 report["issues"].append("missing_block_time")
+            # A completed catch-up, or a first scan from the newest signature (which may find nothing
+            # inside the window), covers everything listed up to now.
+            if caught_up and (backfilled or state.head_signature is not None or state.history_start_reached):
+                state.caught_up_at = listed_through
+                session.commit()
+            report["normalized_history_complete"] = complete
         report["signature_window_complete"] = complete
         report["state"] = "scanned" if complete else "partial"
         if not complete and budget[0] <= 0:
@@ -331,18 +342,65 @@ def verify_ledger(session, wallet: str, rpc, *, limit: int = 50, offset: int = 0
             "usd_and_historical_market_cap_verified": False}
 
 
-def wallet_analysis(session, wallet: Wallet, filters: Filters, as_of: datetime):
+def _chain_fills(session, wallet: str) -> tuple[list[Fill], set[tuple[str, str]]]:
+    """Fills from normalized chain trades; USD and market cap only where pricing proved them."""
+
+    fills, covered = [], set()
+    for t in session.scalars(select(Trade).where(Trade.wallet == wallet)):
+        if t.block_time is None:
+            continue
+        d, usd = t.details, t.details.get("usd") or {}
+        covered.add((t.signature, t.mint))
+
+        def money(key):
+            return Decimal(usd[key]) if usd.get(key) is not None else None
+
+        evidence = d["evidence"]
+        fills.append(Fill(signature=t.signature, event_index=t.event_index, token=t.mint,
+                          timestamp=datetime.fromtimestamp(t.block_time, timezone.utc), kind=t.kind,
+                          quantity=Decimal(d["token_amount"]), gross_usd=money("gross_usd"),
+                          fees_usd=money("fees_usd"), market_cap_usd=money("market_cap_usd") if t.kind == "buy" else None,
+                          source_url=f"https://solscan.io/tx/{t.signature}",
+                          evidence={"source": "chain", "movement": "chain", "trade": evidence["trade"],
+                                    "usd": evidence.get("usd", "unknown"),
+                                    "market_cap": evidence.get("market_cap", "unknown"),
+                                    "normalizer": t.normalizer, "payload_sha256": evidence["payload_sha256"]}))
+    return fills, covered
+
+
+def history_complete(state: SyncState | None, as_of: datetime, days: int) -> bool:
+    """True when the signature scan covers [as_of − days, as_of] and every stored transaction is normalized."""
+    if state is None or state.caught_up_at is None or state.covered_from is None:
+        return False
+    since = int((as_of - timedelta(days=days)).timestamp())
+    return (datetime.fromisoformat(state.caught_up_at) >= as_of and state.covered_from <= since
+            and not state.missing_block_times and state.catchup_before is None
+            and state.normalizer == NORMALIZER_VERSION)
+
+
+def default_as_of(session, wallet: str) -> datetime:
+    """Analyze as of the last completed sync when there is one; otherwise now."""
+    state = session.get(SyncState, wallet)
+    if state is not None and state.caught_up_at is not None:
+        return datetime.fromisoformat(state.caught_up_at)
+    return datetime.now(timezone.utc).replace(microsecond=0)
+
+
+def wallet_analysis(session, wallet: Wallet, filters: Filters, as_of: datetime | None = None):
+    as_of = as_of or default_as_of(session, wallet.address)
+    fills, covered = _chain_fills(session, wallet.address)
     records = session.scalars(select(EventRecord).where(EventRecord.wallet == wallet.address))
-    fills = []
     for row in records:
+        if (row.signature, row.token) in covered:
+            continue  # the chain-derived event for the same signature and mint takes precedence
         p = row.payload
         fills.append(Fill(signature=row.signature, event_index=row.event_index, token=row.token,
                           timestamp=datetime.fromisoformat(row.timestamp), kind=p["kind"],
                           quantity=Decimal(p["quantity"]), source_url=p["source_url"], evidence=row.evidence,
                           **{k: Decimal(p[k]) if p.get(k) is not None else None for k in
                              ("gross_usd", "fees_usd", "market_cap_usd")}))
-    # Signature coverage alone is NOT complete normalized trade/inventory/valuation coverage.
-    result = analyze(wallet.address, fills, filters, as_of, history_complete=False)
+    complete = history_complete(session.get(SyncState, wallet.address), as_of, filters.analysis_days)
+    result = analyze(wallet.address, fills, filters, as_of, history_complete=complete)
     if not session.get(AnalysisSnapshot, result["snapshot_id"]):
         session.add(AnalysisSnapshot(id=result["snapshot_id"], wallet=wallet.address,
                                      as_of=as_of.isoformat(), result=json.loads(json.dumps(result))))

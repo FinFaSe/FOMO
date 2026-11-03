@@ -20,7 +20,7 @@ proceeds. Venue fees are already inside the swapped amount, i.e. prices are effe
 
 from decimal import Decimal
 
-NORMALIZER_VERSION = "balance-delta-v1"
+NORMALIZER_VERSION = "balance-delta-v2"  # v2: token decimals per event
 LAMPORTS = Decimal(10) ** 9
 WSOL = "So11111111111111111111111111111111111111112"
 STABLES = {"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "USDC",
@@ -65,6 +65,7 @@ def legs(transaction: dict, wallet: str) -> dict:
     signers = [k["pubkey"] for k in keys if isinstance(k, dict) and k.get("signer")]
     pre, post = meta.get("preBalances") or [], meta.get("postBalances") or []
     tokens: dict[str, Decimal] = {}
+    decimals: dict[str, int] = {}
     owned_accounts: set[int] = set()
     for field, direction in (("preTokenBalances", -1), ("postTokenBalances", 1)):
         for balance in meta.get(field) or []:
@@ -73,6 +74,7 @@ def legs(transaction: dict, wallet: str) -> dict:
             if balance.get("accountIndex") is not None:
                 owned_accounts.add(balance["accountIndex"])
             tokens[balance["mint"]] = tokens.get(balance["mint"], Decimal(0)) + direction * _amount(balance)
+            decimals[balance["mint"]] = balance["uiTokenAmount"]["decimals"]
     lamports = 0
     indexes = ({addresses.index(wallet)} if wallet in addresses else set()) | owned_accounts
     for i in indexes:
@@ -85,7 +87,7 @@ def legs(transaction: dict, wallet: str) -> dict:
     stables = {STABLES[m]: tokens.pop(m) for m in list(tokens) if m in STABLES and tokens[m]}
     return {"sol": Decimal(trade_lamports) / LAMPORTS,
             "network_fee_sol": Decimal(fee if fee_payer else 0) / LAMPORTS,
-            "stables": stables, "tokens": {m: d for m, d in tokens.items() if d},
+            "stables": stables, "tokens": {m: d for m, d in tokens.items() if d}, "decimals": decimals,
             "fee_payer": fee_payer, "wallet_is_signer": wallet in signers}
 
 
@@ -132,6 +134,7 @@ def normalize(transaction: dict, wallet: str) -> list[dict]:
         quantity = abs(delta)
         events.append({
             "event_index": index, "mint": mint, "kind": kind, "token_amount": quantity,
+            "decimals": leg["decimals"][mint],
             "quote_asset": quote_asset, "quote_amount": quote_amount,
             "price": quote_amount / quantity if quote_amount is not None else None,
             # The network fee is charged once per transaction; attach it to the first event only.

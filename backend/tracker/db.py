@@ -46,6 +46,8 @@ class SyncState(Base):
     missing_block_times: Mapped[int] = mapped_column(Integer, default=0)
     # Normalizer version that produced this wallet's trades; a mismatch triggers a local rebuild.
     normalizer: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    # Every finalized signature with block_time in [covered_from, caught_up_at] is stored.
+    caught_up_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
     updated_at: Mapped[str] = mapped_column(String(40), default=now_iso)
 
 
@@ -99,6 +101,20 @@ class Trade(Base):
     # Decimal amounts are stored as strings to keep exact values across SQLite and PostgreSQL.
     details: Mapped[dict] = mapped_column(JSON)
     normalizer: Mapped[str] = mapped_column(String(40))
+
+
+class PriceCandle(Base):
+    """Cached 1-minute candle from a public price source; prices are exact decimal strings."""
+
+    __tablename__ = "price_candles"
+    source: Mapped[str] = mapped_column(String(200), primary_key=True)
+    symbol: Mapped[str] = mapped_column(String(20), primary_key=True)
+    minute: Mapped[int] = mapped_column(Integer, primary_key=True)
+    open: Mapped[str] = mapped_column(String(40))
+    high: Mapped[str] = mapped_column(String(40))
+    low: Mapped[str] = mapped_column(String(40))
+    close: Mapped[str] = mapped_column(String(40))
+    fetched_at: Mapped[str] = mapped_column(String(40), default=now_iso)
 
 
 class AnalysisSnapshot(Base):

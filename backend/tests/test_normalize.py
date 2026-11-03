@@ -43,26 +43,26 @@ def tx(accounts, pre, post, *, pre_tokens=(), post_tokens=(), programs=(), inner
     }
 
 
-def pump_buy(sol=1 * SOL, tokens=3_500_000_000_000, fee=105_000, **kwargs):
+def pump_buy(sol=1 * SOL, tokens=3_500_000_000_000, fee=105_000, *, mint=TOKEN, program=PUMP, **kwargs):
     """Buy on the bonding curve, creating the wallet's token account (rent paid to its own account)."""
     ata, curve, curve_ata, fee_recipient = b58(601), b58(602), b58(603), b58(604)
     return tx([WALLET, ata, curve, curve_ata, fee_recipient],
               [10 * SOL, 0, 30 * SOL, RENT, 5 * SOL],
               [10 * SOL - sol - RENT - fee, RENT, 30 * SOL + sol * 99 // 100, RENT, 5 * SOL + sol // 100],
-              pre_tokens=[balance(3, TOKEN, curve, 800_000_000_000_000)],
-              post_tokens=[balance(1, TOKEN, WALLET, tokens), balance(3, TOKEN, curve, 800_000_000_000_000 - tokens)],
-              programs=[COMPUTE, ATA_PROGRAM, PUMP], fee=fee, **kwargs)
+              pre_tokens=[balance(3, mint, curve, 800_000_000_000_000)],
+              post_tokens=[balance(1, mint, WALLET, tokens), balance(3, mint, curve, 800_000_000_000_000 - tokens)],
+              programs=[COMPUTE, ATA_PROGRAM, program], fee=fee, **kwargs)
 
 
-def pump_sell(sol=3 * SOL // 2, tokens=3_500_000_000_000, fee=105_000, **kwargs):
+def pump_sell(sol=3 * SOL // 2, tokens=3_500_000_000_000, fee=105_000, *, mint=TOKEN, program=PUMP, **kwargs):
     """Sell everything on the curve and close the token account (rent refunded to the wallet)."""
     ata, curve, curve_ata = b58(601), b58(602), b58(603)
     return tx([WALLET, ata, curve, curve_ata],
               [9 * SOL, RENT, 31 * SOL, RENT],
               [9 * SOL + sol + RENT - fee, 0, 31 * SOL - sol, RENT],
-              pre_tokens=[balance(1, TOKEN, WALLET, tokens), balance(3, TOKEN, curve, 700_000_000_000_000)],
-              post_tokens=[balance(3, TOKEN, curve, 700_000_000_000_000 + tokens)],
-              programs=[COMPUTE, PUMP], fee=fee, **kwargs)
+              pre_tokens=[balance(1, mint, WALLET, tokens), balance(3, mint, curve, 700_000_000_000_000)],
+              post_tokens=[balance(3, mint, curve, 700_000_000_000_000 + tokens)],
+              programs=[COMPUTE, program], fee=fee, **kwargs)
 
 
 def test_pump_buy_nets_own_rent_and_separates_the_network_fee():

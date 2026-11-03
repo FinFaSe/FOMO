@@ -11,8 +11,10 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select
 
 from .adapters.fomo import FomoAPI
+from .adapters.prices import CoinbaseCandles
 from .adapters.solana import ProviderError, SolanaRPC, digest, observe
 from .db import AnalysisSnapshot, Observation, RawTransaction, SourceCapture, Trade, Wallet, database, now_iso
+from .pricing import price_trades
 from .schemas import (
     DiscoveryRequest,
     Filters,
@@ -27,12 +29,14 @@ from .schemas import (
 from .service import chain_positions, import_ledger, ingest, renormalize, verify_ledger, wallet_analysis
 
 
-def create_app(db_url: str | None = None, rpc=None, fomo=None) -> FastAPI:
+def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None) -> FastAPI:
     app = FastAPI(title="FOMO Smart Money Tracker", version="0.1.0")
     engine, sessions = database(db_url)
     app.state.engine = engine
     rpc = rpc or SolanaRPC()
     fomo = fomo or FomoAPI()
+    prices = prices or CoinbaseCandles()
+    app.state.prices = prices
     write_lock = threading.Lock()
     allowed_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
     app.add_middleware(CORSMiddleware, allow_origins=allowed_origins,
@@ -100,10 +104,12 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None) -> FastAPI:
     def config():
         return {"default_filters": Filters().model_dump(mode="json"), "chain": "solana",
                 "fomo_api_configured": bool(fomo.key), "rpc_source": rpc.source,
+                "price_source": getattr(prices, "source", None),
                 "data_mode": "real_only", "ranking_requires": ["complete_normalized_history",
                   "verified_swaps", "verified_historical_usd_and_fees", "verified_historical_market_cap"],
                 "limitations": ["FOMO API es independiente y no oficial; su historial es incompleto.",
-                                "RPC público conserva movimientos; no inventa precios históricos."]}
+                                "RPC público conserva movimientos; no inventa precios históricos.",
+                                "SOL/USD por vela de 1 minuto de Coinbase; market cap verificado solo para mints de pump.fun."]}
 
     @app.get("/api/wallets")
     def wallets(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), s=Depends(session)):
@@ -129,7 +135,22 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None) -> FastAPI:
 
     @app.post("/api/wallets/{wallet}/sync", dependencies=[Depends(write_guard)])
     def sync(wallet: str, body: SyncRequest, s=Depends(session)):
-        return ingest(s, get_wallet(s, wallet), rpc, body)
+        w = get_wallet(s, wallet)
+        report = ingest(s, w, rpc, body)
+        try:
+            report["pricing"] = price_trades(s, wallet, prices)
+        except ProviderError as exc:
+            # Prices are best effort; trades stay unpriced (and non-evaluable) until a later attempt.
+            s.rollback()
+            report["pricing"] = {"error": exc.message}
+        w.sync = report
+        s.commit()
+        return report
+
+    @app.post("/api/wallets/{wallet}/price", dependencies=[Depends(write_guard)])
+    def price(wallet: str, s=Depends(session)):
+        get_wallet(s, wallet)
+        return price_trades(s, wallet, prices)
 
     @app.post("/api/wallets/{wallet}/ledger", dependencies=[Depends(write_guard)])
     def ledger(wallet: str, body: LedgerImport, s=Depends(session)):
@@ -174,7 +195,9 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None) -> FastAPI:
     @app.post("/api/wallets/{wallet}/normalize", dependencies=[Depends(write_guard)])
     def normalize_wallet(wallet: str, s=Depends(session)):
         get_wallet(s, wallet)
-        return renormalize(s, wallet)
+        rebuilt = renormalize(s, wallet)
+        rebuilt["pricing"] = price_trades(s, wallet, None)  # cached candles only: no network
+        return rebuilt
 
     @app.get("/api/wallets/{wallet}/chain-positions")
     def wallet_chain_positions(wallet: str, days: int = Query(90, ge=1, le=3650), as_of: datetime | None = None,
@@ -190,7 +213,7 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None) -> FastAPI:
     def analysis(wallet: str, filters: Annotated[Filters, Depends()], as_of: datetime | None = None,
                  s=Depends(session)):
         try:
-            timestamp = utc(as_of) if as_of else datetime.now(timezone.utc).replace(microsecond=0)
+            timestamp = utc(as_of) if as_of else None  # default: last completed sync, else now
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
         return wallet_analysis(s, get_wallet(s, wallet), filters, timestamp)
@@ -202,9 +225,10 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None) -> FastAPI:
         results = []
         # Bounded local research dataset. No source-reported leaderboard PnL is used.
         for wallet in s.scalars(select(Wallet).order_by(Wallet.address)):
-            r = wallet_analysis(s, wallet, filters, timestamp)
+            # Each wallet is analyzed as of its own last completed sync, so its history is complete there.
+            r = wallet_analysis(s, wallet, filters)
             if r["eligible"]:
-                results.append({"address": wallet.address, "label": wallet.label,
+                results.append({"address": wallet.address, "label": wallet.label, "as_of": r["as_of"],
                                 "score": r["score"], "metrics": r["metrics"], "snapshot_id": r["snapshot_id"]})
         results.sort(key=lambda x: (-(x["score"]["verified_smart_money"] or 0), x["address"]))
         return {"items": results[offset:offset+limit], "total": len(results), "as_of": timestamp.isoformat(),
