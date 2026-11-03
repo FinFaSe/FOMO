@@ -28,10 +28,12 @@ from .db import (
     TokenQuote,
     Trade,
     Wallet,
+    WalletFunding,
     database,
     now_iso,
 )
 from .discovery import add_seed, candidates, scan_seed, seed_json
+from .entities import enqueue_funding, entities, entity_index, funding_json, lookup_funding
 from .jobs import Worker, cancel, enqueue, ensure_idle, job_json, run_inline, worker_status
 from .portfolio import open_positions
 from .pricing import price_trades
@@ -159,6 +161,7 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None, quot
             w = Wallet(address=body.address, label=body.label)
             s.add(w)
             s.commit()
+        enqueue_funding(s, [body.address], "tracked")
         return wallet_json(w)
 
     @app.patch("/api/wallets/{wallet}", dependencies=[Depends(write_guard)])
@@ -307,13 +310,18 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None, quot
                  offset: int = Query(0, ge=0), s=Depends(session)):
         timestamp = datetime.now(timezone.utc).replace(microsecond=0)
         results = []
+        groups = entity_index(s)
         # Bounded local research dataset. No source-reported leaderboard PnL is used.
         for wallet in s.scalars(select(Wallet).order_by(Wallet.address)):
             # Each wallet is analyzed as of its own last completed sync, so its history is complete there.
             r = wallet_analysis(s, wallet, filters)
             if r["eligible"]:
+                entity = groups.get(wallet.address)
                 results.append({"address": wallet.address, "label": wallet.label, "as_of": r["as_of"],
-                                "score": r["score"], "metrics": r["metrics"], "snapshot_id": r["snapshot_id"]})
+                                "score": r["score"], "metrics": r["metrics"], "snapshot_id": r["snapshot_id"],
+                                # Linked wallets may be one actor: they are not independent confirmations.
+                                "entity": {"id": entity["id"], "size": entity["size"],
+                                           "members": entity["members"]} if entity else None})
         results.sort(key=lambda x: (-(x["score"]["verified_smart_money"] or 0), x["address"]))
         return {"items": results[offset:offset+limit], "total": len(results), "as_of": timestamp.isoformat(),
                 "notice": "Solo historial completo y evidencia verificada; las importaciones no se autoverifican."}
@@ -384,7 +392,50 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None, quot
             s.add(row)
             s.commit()
         job, created = enqueue(s, wallet, JobRequest())
+        enqueue_funding(s, [wallet], "tracked")
         return {"wallet": wallet_json(row), "job": job_json(job), "created": created}
+
+    @app.get("/api/funding/{target}")
+    def funding(target: str, s=Depends(session)):
+        row = s.get(WalletFunding, target)
+        if not row:
+            raise HTTPException(404, "Sin búsqueda de financiación para esta dirección")
+        return funding_json(row)
+
+    @app.post("/api/funding/{target}", status_code=202)
+    def queue_funding(target: str, s=Depends(session)):
+        try:
+            address(target)
+        except ValueError:
+            raise HTTPException(422, "Dirección Solana inválida") from None
+        enqueue_funding(s, [target], "manual")
+        return funding_json(s.get(WalletFunding, target))
+
+    @app.post("/api/funding/{target}/lookup", dependencies=[Depends(write_guard)])
+    def lookup_funding_now(target: str, s=Depends(session)):
+        # Synchronous, bounded lookup (scripts, tests); the worker processes queued lookups in the background.
+        try:
+            address(target)
+        except ValueError:
+            raise HTTPException(422, "Dirección Solana inválida") from None
+        row = s.get(WalletFunding, target) or WalletFunding(address=target, requested_by="manual")
+        row.state, row.funder, row.funder_kind, row.reason = "scanning", None, None, None
+        s.add(row)
+        s.commit()
+        return funding_json(lookup_funding(s, rpc, row))
+
+    @app.get("/api/entities")
+    def linked_entities(min_size: int = Query(2, ge=2, le=1000), s=Depends(session)):
+        items = entities(s, min_size=min_size)
+        return {"items": items, "total": len(items),
+                "notice": "Vínculos = indicios de control común (financiación o compras juntas), no prueba."}
+
+    @app.get("/api/wallets/{wallet}/links")
+    def wallet_links(wallet: str, s=Depends(session)):
+        get_wallet(s, wallet)
+        entity = entity_index(s).get(wallet)
+        funded = [funding_json(r) for r in s.scalars(select(WalletFunding).where(WalletFunding.funder == wallet))]
+        return {"funding": funding_json(s.get(WalletFunding, wallet)), "entity": entity, "funded": funded}
 
     @app.post("/api/discovery", dependencies=[Depends(write_guard)])
     def discovery(body: DiscoveryRequest, s=Depends(session)):

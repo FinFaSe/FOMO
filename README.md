@@ -112,12 +112,27 @@ La correlación entre tokens aún puede reducir la independencia. Ver [método](
    entrada; se ordena por aciertos y límite inferior de Wilson y por defecto excluye las wallets marcadas.
    «Estudiar» (`POST /api/discovery/candidates/{wallet}/study`) la añade y encola su sincronización.
    `POST /api/discovery` (firmantes recientes) ahora escanea la bonding curve cuando existe.
-6. Opcional: importa un ledger JSON documentado. Si la cadena ya aporta el evento de la misma firma y mint,
+6. **Bots, insiders y vínculos**:
+   - El análisis calcula señales de comportamiento (compra y venta del mismo token en ≤ 2 bloques, posiciones
+     de ≤ 60 s, operaciones por día). «Probable bot / MEV» excluye la wallet del ranking (`bot_or_mev_behavior`).
+   - Las propinas a Jito que paga la wallet se separan del importe del swap (`tip_sol`, se suman a las fees).
+   - **Origen de fondos** (`wallet_funding`): quién envió a cada dirección su primer SOL, buscando en sus
+     transacciones más antiguas. El worker lo hace en segundo plano para las wallets en estudio, el creador y
+     los primeros compradores de cada semilla; `POST /api/funding/{address}/lookup` lo hace al momento. Un
+     financiador con 1.000 firmas en menos de un día (exchange, router, bot) no vincula.
+   - **Entidades** (`GET /api/entities`, `GET /api/wallets/{wallet}/links`): mismo financiador, financiada por
+     otra dirección conocida, o compras en el mismo bloque en ≥ 2 semillas. Son indicios, no prueba. El ranking
+     señala las wallets vinculadas y los candidatos muestran su grupo.
+   - **Insiders**: un candidato financiado por el creador, que financió al creador, que comparte financiador
+     con él o que está vinculado a él queda marcado y excluido por defecto.
+   - **¿Se puede copiar?**: para cada compra temprana se mide cuánto se movió el precio 5/30/60 s después y su
+     tamaño frente al SOL de la curva; los candidatos muestran la mediana.
+7. Opcional: importa un ledger JSON documentado. Si la cadena ya aporta el evento de la misma firma y mint,
    prevalece el de la cadena.
    La importación es una declaración externa, **no** evidencia verificada por sí misma.
-7. **Verificar ledger** comprueba fecha y delta neto del token contra el RPC. No valida
+8. **Verificar ledger** comprueba fecha y delta neto del token contra el RPC. No valida
    automáticamente que fuera un swap ni sus precios históricos USD o capitalización.
-8. Examina métricas exploratorias, exclusiones y snapshot; añade wallets a la watchlist.
+9. Examina métricas exploratorias, exclusiones y snapshot; añade wallets a la watchlist.
 
 Formato del ledger (números decimales como strings; ver modelo `LedgerImport` en OpenAPI):
 

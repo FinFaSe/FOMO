@@ -20,6 +20,7 @@ from sqlalchemy import func, select, update
 from .adapters.solana import ProviderError
 from .db import Job, Trade, Wallet, WorkerHeartbeat, now_iso
 from .discovery import claim_seed, recover_stale_seeds, scan_seed
+from .entities import claim_funding, enqueue_funding, lookup_funding, recover_stale_funding
 from .pricing import price_trades
 from .schemas import JobRequest, SyncRequest
 from .service import ingest
@@ -92,6 +93,7 @@ def cancel(session, job: Job) -> Job:
 
 def sync_and_price(session, wallet: Wallet, rpc, prices, request: SyncRequest, on_progress=None) -> dict:
     report = ingest(session, wallet, rpc, request, on_progress)
+    enqueue_funding(session, [wallet.address], "tracked")  # no-op once looked up
     mints = set(session.scalars(select(Trade.mint).where(Trade.wallet == wallet.address,
                                                          Trade.kind.in_(("buy", "sell")))))
     try:
@@ -241,9 +243,11 @@ def worker_status(session) -> dict:
 
 
 class Worker:
-    def __init__(self, sessions, rpc, prices, *, quotes=None, worker_id: str | None = None,
+    def __init__(self, sessions, rpc, prices, *, quotes=None, lookup_funding: bool = True,
+                 worker_id: str | None = None,
                  refresh_minutes: float | None = None, poll_seconds: float = 2.0, progress_interval: float = 1.0):
         self.sessions, self.rpc, self.prices, self.quotes = sessions, rpc, prices, quotes
+        self.lookup_funding = lookup_funding
         self.id = worker_id or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:6]}"
         if refresh_minutes is None:
             refresh_minutes = float(os.getenv("TRACKER_REFRESH_MINUTES", "30"))
@@ -261,7 +265,8 @@ class Worker:
         session.commit()
 
     def run_once(self):
-        """Housekeeping plus at most one job or seed scan. Returns what ran (Job or DiscoverySeed), if any."""
+        """Housekeeping plus at most one unit of work: a sync job, else a seed scan, else a funding lookup.
+        Returns what ran (Job, DiscoverySeed or WalletFunding), if anything."""
         with self.sessions() as session:
             self.beat(session)
             recover_stale(session)
@@ -275,12 +280,21 @@ class Worker:
             # Idle: scan one queued discovery seed (lower priority than wallet syncs).
             recover_stale_seeds(session)
             seed = claim_seed(session, self.id)
-            if seed is None:
+            if seed is not None:
+                log.info("discovery: scanning seed %s", seed.mint)
+                report = scan_seed(session, self.rpc, self.prices, self.quotes, seed)
+                log.info("discovery: seed %s %s", seed.mint, report["state"])
+                return seed
+            if not self.lookup_funding:
                 return None
-            log.info("discovery: scanning seed %s", seed.mint)
-            report = scan_seed(session, self.rpc, self.prices, self.quotes, seed)
-            log.info("discovery: seed %s %s", seed.mint, report["state"])
-            return seed
+            # Lowest priority: funding origins for insider and linked-wallet checks.
+            recover_stale_funding(session)
+            row = claim_funding(session, self.id)
+            if row is None:
+                return None
+            lookup_funding(session, self.rpc, row)
+            log.info("funding: %s %s", row.address, row.state)
+            return row
 
     def run(self, session, job: Job):
         wallet = session.get(Wallet, job.wallet)

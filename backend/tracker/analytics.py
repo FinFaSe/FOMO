@@ -17,7 +17,7 @@ from statistics import mean, median
 from .schemas import Filters
 
 ZERO = Decimal(0)
-VERSION = "wac-wilson-token-v2"  # v2: dust remainders close a cycle
+VERSION = "wac-wilson-token-v3"  # v2: dust remainders close a cycle; v3: bot/MEV behavior exclusion
 # A cycle closes when what is left after a disposal is at most this fraction of the cycle's peak holding.
 # Wallets often keep a tiny unsellable remainder; without this the position would stay open forever and
 # never count as a win or a loss.
@@ -215,6 +215,42 @@ def position_json(p: Position, threshold: Decimal) -> dict:
     }
 
 
+# Behavior thresholds. A copy-trader cannot follow trades that open and close within a couple of blocks, and a
+# wallet trading hundreds of times a day is an automated strategy, not a signal to copy.
+SAME_BLOCK_SLOTS = 2
+FAST_HOLD_SECONDS = 60
+LIKELY_BOT = {"same_block_round_trips": 3, "trades_per_day": 300, "fast_share": 0.5, "fast_min_closed": 10}
+POSSIBLE_BOT = {"same_block_round_trips": 1, "trades_per_day": 100, "fast_share": 0.25, "fast_min_closed": 5}
+
+
+def behavior(positions: list[Position], fills: list[Fill], since: datetime, as_of: datetime) -> dict:
+    """Bot/MEV signals from the window's fills; deterministic, so part of the snapshot."""
+    closed = [p for p in positions if p.closed_at is not None]
+    same_block = 0
+    for p in closed:
+        slots = [f.slot for f in p.fills]
+        if slots and None not in slots and max(slots) - min(slots) <= SAME_BLOCK_SLOTS:
+            same_block += 1
+    fast = sum((p.closed_at - p.opened_at).total_seconds() <= FAST_HOLD_SECONDS for p in closed)
+    per_day = defaultdict(int)
+    for f in fills:
+        if since <= f.timestamp <= as_of and f.kind in ("buy", "sell"):
+            per_day[f.timestamp.date()] += 1
+    busiest = max(per_day.values(), default=0)
+    fast_share = fast / len(closed) if closed else 0.0
+
+    def matches(rule):
+        return (same_block >= rule["same_block_round_trips"] or busiest >= rule["trades_per_day"]
+                or (len(closed) >= rule["fast_min_closed"] and fast_share >= rule["fast_share"]))
+
+    level = "likely_bot" if matches(LIKELY_BOT) else "possible_bot" if matches(POSSIBLE_BOT) else "none"
+    return {"classification": level, "same_block_round_trips": same_block, "fast_round_trips": fast,
+            "fast_round_trip_share": round(fast_share, 4), "max_trades_per_day": busiest,
+            "active_days": len(per_day), "thresholds": {"likely_bot": LIKELY_BOT, "possible_bot": POSSIBLE_BOT,
+                                                       "same_block_slots": SAME_BLOCK_SLOTS,
+                                                       "fast_hold_seconds": FAST_HOLD_SECONDS}}
+
+
 def analyze(wallet: str, fills: list[Fill], filters: Filters, as_of: datetime,
             history_complete: bool = False) -> dict:
     since = as_of - timedelta(days=filters.analysis_days)
@@ -273,7 +309,10 @@ def analyze(wallet: str, fills: list[Fill], filters: Filters, as_of: datetime,
              "early_entry": round(10 * early_bound, 4),
              "replicability": 0.0, "data_quality": round(5 * coverage * int(history_complete), 4)}
     penalty = min(0.5, max(0, ((concentration or 0) - 0.5)))
+    signals = behavior(positions, fills, since, as_of)
     reasons = []
+    if signals["classification"] == "likely_bot":
+        reasons.append("bot_or_mev_behavior")
     if n < filters.min_evaluable_positions:
         reasons.append("insufficient_evaluable_positions")
     if not n or wins / n < filters.min_win_rate:
@@ -327,6 +366,7 @@ def analyze(wallet: str, fills: list[Fill], filters: Filters, as_of: datetime,
             "top_profit_share": concentration, "max_realized_drawdown_usd": str(drawdown) if n else None,
             "verified_data_fraction": coverage,
         },
+        "behavior": signals,
         "weekly_realized_pnl": [{"week": k, "pnl_usd": str(v)} for k, v in sorted(weekly.items())],
         "realized_pnl_curve": curve,
         "positions": [position_json(p, filters.max_entry_market_cap_usd) for p in positions],

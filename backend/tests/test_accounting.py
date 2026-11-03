@@ -130,10 +130,11 @@ def test_qualified_synthetic_history_and_exact_thresholds(fill):
     events = []
     for i in range(30):
         token = b58(i + 1000)
-        events.extend([fill("buy", 1, 100, token=token, cap="250000"),
-                       fill("sell", 1, 600 if i < 27 else 50, token=token)])
+        # Held for about a day: instant round trips would (correctly) look like a bot.
+        events.extend([fill("buy", 1, 100, token=token, cap="250000", days_ago=3),
+                       fill("sell", 1, 600 if i < 27 else 50, token=token, days_ago=2)])
     r = analyze(WALLET, events, Filters(), AS_OF, True)
-    assert r["eligible"]
+    assert r["eligible"] and r["behavior"]["classification"] == "none"
     assert r["metrics"]["evaluable_positions"] == 30
     assert r["score"]["verified_smart_money"] <= 100
     assert r["score"]["components"]["replicability"] == 0
@@ -208,7 +209,7 @@ def test_dust_remainder_closes_the_cycle_and_writes_off_its_cost(fill):
     r = analyze(WALLET, events, Filters(), AS_OF)
     assert r["metrics"]["evaluable_positions"] == 1 and r["metrics"]["open_positions"] == 0
     assert r["positions"][0]["dust_written_off_quantity"] == "50"
-    assert r["method_version"] == "wac-wilson-token-v2"
+    assert r["method_version"] == "wac-wilson-token-v3"
 
 
 def test_dust_threshold_is_inclusive_and_relative_to_the_peak(fill):

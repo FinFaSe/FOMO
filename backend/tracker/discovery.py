@@ -19,7 +19,8 @@ from sqlalchemy import delete, select, update
 
 from .adapters.solana import ProviderError
 from .analytics import wilson
-from .db import DiscoverySeed, EarlyBuy, TokenMint, TokenQuote, Wallet, now_iso
+from .db import DiscoverySeed, EarlyBuy, TokenMint, TokenQuote, Wallet, WalletFunding, now_iso
+from .entities import enqueue_funding, entity_index
 from .normalize import normalize
 from .portfolio import refresh_quotes
 from .pricing import _market_cap, load_candles, sol_usd
@@ -29,7 +30,9 @@ from .tokens import PUMP_PROGRAM, pump_bonding_curve, refresh_mints
 
 PAGE = 1000
 STALE_AFTER = timedelta(minutes=10)
-FLAG_NAMES = ("creator", "launch_tx", "launch_slot")
+COPY_HORIZONS = (5, 30, 60)  # seconds a follower might lag behind the buy
+FUNDING_BUYERS = 30
+INSIDER_FLAGS = ("funded_by_creator", "funded_creator", "shares_funder_with_creator", "linked_to_creator")
 
 
 def _text(value):
@@ -180,6 +183,25 @@ def _scan(session, rpc, prices, quotes, seed, report):
         cap, method, _supply, status = _market_cap(event["price"] * usd, event["decimals"], pump, facts)
         return cap, method, status
 
+    def follow_move(raw, event, horizon):
+        """Price change for someone copying `horizon` seconds later: first scanned trade at or after then."""
+        if raw.block_time is None or event["price"] is None or event["quote_asset"] != "SOL":
+            return None
+        for later_raw, _, later in events:
+            if (later_raw.block_time is not None and later_raw.block_time >= raw.block_time + horizon
+                    and later["price"] is not None and later["quote_asset"] == "SOL"):
+                return later["price"] / event["price"] - 1
+        return None
+
+    def curve_sol_before(raw):
+        tx_keys = raw.payload["transaction"]["message"]["accountKeys"]
+        addresses = [k["pubkey"] if isinstance(k, dict) else k for k in tx_keys]
+        pre = (raw.payload.get("meta") or {}).get("preBalances") or []
+        if seed.address_kind != "pump_bonding_curve" or seed.scan_address not in addresses:
+            return None
+        i = addresses.index(seed.scan_address)
+        return Decimal(pre[i]) / Decimal(10 ** 9) if i < len(pre) else None
+
     caps, rows = [], []
     for raw, signer, event in events:
         cap, method, status = entry_cap(raw, event)
@@ -196,13 +218,17 @@ def _scan(session, rpc, prices, quotes, seed, report):
             flags.append("launch_slot")
         minutes = ((raw.block_time - launch.block_time) / 60
                    if raw.block_time is not None and launch.block_time is not None else None)
+        reserve = curve_sol_before(raw)
+        moves = {f"price_move_{h}s": _text(follow_move(raw, event, h)) for h in COPY_HORIZONS}
         rows.append(EarlyBuy(mint=seed.mint, wallet=signer, signature=raw.signature, event_index=event["event_index"],
                              slot=raw.slot, block_time=raw.block_time, rank=len(rows) + 1, details={
                                  "sol_amount": _text(event["quote_amount"]),
                                  "token_amount": str(event["token_amount"]), "price_sol": _text(event["price"]),
                                  "entry_cap_usd": _text(cap), "cap_method": method, "cap_status": status,
                                  "minutes_after_launch": minutes, "flags": flags, "trade": event["trade"],
-                                 "venues": event["venues"]}))
+                                 "venues": event["venues"], **moves, "curve_sol_before": _text(reserve),
+                                 "size_vs_curve": _text(event["quote_amount"] / reserve)
+                                 if reserve and event["quote_amount"] is not None else None}))
     current = None
     if quotes is not None:
         try:
@@ -229,6 +255,9 @@ def _scan(session, rpc, prices, quotes, seed, report):
                     "transactions": len(raws), "price_requests": requests, "issues": report["issues"]}
     seed.state, seed.error, seed.locked_by, seed.finished_at = "done", None, None, now_iso()
     session.commit()
+    # Funding origins of the creator and the first buyers feed the insider and linked-wallet checks.
+    buyers = list(dict.fromkeys(r.wallet for r in rows))[:FUNDING_BUYERS]
+    report["funding_queued"] = enqueue_funding(session, [seed.creator, *buyers], "discovery")
     report["state"], report["early_buys"] = "done", len(rows)
 
 
@@ -240,6 +269,24 @@ def candidates(session, *, multiple: Decimal = Decimal(10), min_seeds: int = 1, 
     for row in session.scalars(select(EarlyBuy).where(EarlyBuy.mint.in_(list(seeds))).order_by(EarlyBuy.rank)):
         first.setdefault((row.wallet, row.mint), row)
     tracked = set(session.scalars(select(Wallet.address)))
+    funding = {r.address: r for r in session.scalars(select(WalletFunding).where(WalletFunding.state == "done"))}
+    groups = entity_index(session)
+
+    def insider_flags(wallet, creator):
+        if not creator or wallet == creator:
+            return []  # the creator already carries its own flag
+        flags, mine, theirs = [], funding.get(wallet), funding.get(creator)
+        if mine is not None and mine.funder == creator:
+            flags.append("funded_by_creator")
+        if theirs is not None and theirs.funder == wallet:
+            flags.append("funded_creator")
+        if (mine is not None and theirs is not None and mine.funder == theirs.funder
+                and mine.funder_kind == "wallet"):
+            flags.append("shares_funder_with_creator")
+        if wallet in groups and creator in groups[wallet]["members"] and not flags:
+            flags.append("linked_to_creator")
+        return flags
+
     by_wallet: dict[str, list] = {}
     for (wallet, mint), row in first.items():
         outcome = seeds[mint].outcome or {}
@@ -254,7 +301,8 @@ def candidates(session, *, multiple: Decimal = Decimal(10), min_seeds: int = 1, 
             "entry_cap_status": row.details.get("cap_status"), "peak_cap_lower_bound_usd": peak,
             "peak_basis": outcome.get("peak_basis"),
             "multiple": _text(Decimal(peak) / Decimal(entry)) if status != "unknown" else None,
-            "status": status, "flags": row.details.get("flags", [])})
+            "status": status, "flags": row.details.get("flags", []) + insider_flags(wallet, seeds[mint].creator),
+            "price_move_30s": row.details.get("price_move_30s"), "size_vs_curve": row.details.get("size_vs_curve")})
     items = []
     for wallet, entries in by_wallet.items():
         flags = sorted({f for e in entries for f in e["flags"]})
@@ -264,6 +312,9 @@ def candidates(session, *, multiple: Decimal = Decimal(10), min_seeds: int = 1, 
         misses = sum(e["status"] == "miss" for e in entries)
         low, high = wilson(hits, hits + misses)
         minutes = [e["minutes_after_launch"] for e in entries if e["minutes_after_launch"] is not None]
+        moves = [Decimal(e["price_move_30s"]) for e in entries if e["price_move_30s"] is not None]
+        sizes = [Decimal(e["size_vs_curve"]) for e in entries if e["size_vs_curve"] is not None]
+        entity = groups.get(wallet)
         items.append({"wallet": wallet, "seeds": len(entries), "hits": hits, "misses": misses,
                       "unknown": len(entries) - hits - misses, "hit_rate": hits / (hits + misses) if hits + misses
                       else None, "hit_rate_ci95": [low, high],
@@ -271,6 +322,10 @@ def candidates(session, *, multiple: Decimal = Decimal(10), min_seeds: int = 1, 
                                                 for e in entries),
                       "median_minutes_after_launch": median(minutes) if minutes else None,
                       "median_rank": median(e["rank"] for e in entries), "flags": flags,
+                      # What a follower 30 s late would have paid extra, and how big the buy was for the curve.
+                      "median_price_move_30s": _text(median(moves)) if moves else None,
+                      "median_size_vs_curve": _text(median(sizes)) if sizes else None,
+                      "entity": {"id": entity["id"], "size": entity["size"]} if entity else None,
                       "tracked": wallet in tracked, "entries": sorted(entries, key=lambda e: e["mint"])})
     items.sort(key=lambda i: (-i["hits"], -(i["hit_rate_ci95"][0] or 0), -i["seeds"], i["wallet"]))
     return {"items": items[:limit], "total": len(items), "seeds": len(seeds), "multiple": str(multiple),

@@ -174,7 +174,12 @@ def test_worker_scans_queued_seeds_only_when_no_sync_is_waiting(client):  # noqa
     second = w.run_once()
     assert type(second).__name__ == "DiscoverySeed" and second.mint == mint
     assert c.get("/api/discovery/seeds").json()["items"][0]["state"] == "done"
-    assert w.run_once() is None
+    # Lowest priority: the funding lookups the scan queued (creator + early buyers + the tracked wallet).
+    looked_up = []
+    while (unit := w.run_once()) is not None:
+        assert type(unit).__name__ == "WalletFunding"
+        looked_up.append(unit.address)
+    assert CREATOR in looked_up and ALICE in looked_up and WALLET in looked_up
 
 
 def test_seed_without_activity_fails_with_a_hint_and_non_pump_launch_is_flagged(client):  # noqa: F811

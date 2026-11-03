@@ -13,14 +13,23 @@ A trade is `verified` only when a recognized venue program ran, the wallet signe
 token was exchanged for exactly one quote asset in the opposite direction. The same pattern without
 a recognized venue stays `inferred`. Movements without an opposite quote leg are transfers.
 
-Known contamination of the SOL leg: Jito or other tips and rent paid to accounts the wallet does not
+Jito tips paid by the wallet are split from the SOL leg into `tip_sol` (a cost, like the network fee).
+Known contamination of the SOL leg: tips to other services and rent paid to accounts the wallet does not
 own (e.g. protocol PDAs) are counted as part of the trade, which slightly raises costs and lowers
 proceeds. Venue fees are already inside the swapped amount, i.e. prices are effective prices.
 """
 
 from decimal import Decimal
 
-NORMALIZER_VERSION = "balance-delta-v2"  # v2: token decimals per event
+NORMALIZER_VERSION = "balance-delta-v3"  # v2: token decimals per event; v3: Jito tips split from the swap
+# Jito's eight published tip accounts (getTipAccounts). A tip is a cost of getting the trade landed, not part of the
+# swapped amount: it is reported next to the network fee so the effective price is not inflated by it.
+JITO_TIP_ACCOUNTS = frozenset({
+    "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5", "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
+    "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY", "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49",
+    "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh", "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+    "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL", "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
+})
 LAMPORTS = Decimal(10) ** 9
 WSOL = "So11111111111111111111111111111111111111112"
 STABLES = {"EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v": "USDC",
@@ -82,11 +91,15 @@ def legs(transaction: dict, wallet: str) -> dict:
             lamports += post[i] - pre[i]
     fee_payer = bool(addresses) and addresses[0] == wallet
     fee = meta.get("fee") or 0
-    trade_lamports = lamports + (fee if fee_payer else 0)
+    tip = 0
+    if fee_payer:  # a tip is paid by the transaction's payer; a relayer's tip is not the wallet's cost
+        tip = sum(post[i] - pre[i] for i, a in enumerate(addresses)
+                  if a in JITO_TIP_ACCOUNTS and i < len(pre) and i < len(post) and post[i] > pre[i])
+    trade_lamports = lamports + (fee + tip if fee_payer else 0)
     tokens.pop(WSOL, None)  # counted through the wSOL account lamports above
     stables = {STABLES[m]: tokens.pop(m) for m in list(tokens) if m in STABLES and tokens[m]}
     return {"sol": Decimal(trade_lamports) / LAMPORTS,
-            "network_fee_sol": Decimal(fee if fee_payer else 0) / LAMPORTS,
+            "network_fee_sol": Decimal(fee if fee_payer else 0) / LAMPORTS, "tip_sol": Decimal(tip) / LAMPORTS,
             "stables": stables, "tokens": {m: d for m, d in tokens.items() if d}, "decimals": decimals,
             "fee_payer": fee_payer, "wallet_is_signer": wallet in signers}
 
@@ -139,6 +152,7 @@ def normalize(transaction: dict, wallet: str) -> list[dict]:
             "price": quote_amount / quantity if quote_amount is not None else None,
             # The network fee is charged once per transaction; attach it to the first event only.
             "network_fee_sol": leg["network_fee_sol"] if index == 0 else Decimal(0),
+            "tip_sol": leg["tip_sol"] if index == 0 else Decimal(0),
             "venues": venues, "trade": trade, "issues": issues,
         })
     return events

@@ -27,11 +27,12 @@ def balance(index, mint, owner, amount, decimals=6):
 
 
 def tx(accounts, pre, post, *, pre_tokens=(), post_tokens=(), programs=(), inner=(), fee=5000,
-       err=None, signers=None, block_time=1_800_000_000, signature=None):
+       err=None, signers=None, block_time=1_800_000_000, signature=None, slot=None):
     """Build a SYNTHETIC finalized transaction. accounts[0] is the fee payer."""
     signers = signers if signers is not None else {accounts[0]}
     return {
-        "slot": 100, "blockTime": block_time, "version": 0,
+        # ~2 slots per second, so transactions at different times land in different blocks.
+        "slot": slot if slot is not None else block_time * 2, "blockTime": block_time, "version": 0,
         "transaction": {"signatures": [signature or b58(1, 64)], "message": {
             "accountKeys": [{"pubkey": a, "signer": a in signers, "writable": True, "source": "transaction"}
                             for a in accounts],

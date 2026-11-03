@@ -103,6 +103,29 @@ retraso de `finalized`. Sin `as_of` explícito, el análisis y el ranking usan e
 - Sesgo de supervivencia: la tasa de aciertos solo es informativa si las semillas incluyen fracasos. Los candidatos
   no entran al ranking por sí mismos: hay que sincronizarlos y superar la validación normal.
 
+## Bots, insiders y wallets vinculadas
+
+- **Comportamiento** (parte del snapshot, versión `wac-wilson-token-v3`): posiciones cerradas cuyo primer y último
+  fill están a ≤ 2 slots (compra-venta en el mismo bloque o el siguiente, típico de MEV), posiciones de ≤ 60 s y
+  máximo de compras+ventas en un día UTC. «Probable bot»: ≥ 3 compra-venta en ≤ 2 bloques, ≥ 300 operaciones en un
+  día o ≥ 50% de posiciones de ≤ 60 s con ≥ 10 cerradas; excluye del ranking. «Posible bot» (≥ 1, ≥ 100, ≥ 25% con
+  ≥ 5) solo se muestra. Umbrales en `tracker/analytics.py`.
+- **Propinas Jito**: lamports que reciben las ocho cuentas de propinas de Jito en transacciones que paga la wallet;
+  se restan del tramo SOL y se suman a las fees (el PnL no cambia, el precio efectivo deja de incluirlas).
+- **Origen de fondos**: se listan las firmas de la dirección hasta la primera (máx. 10 páginas de 1.000; si no
+  alcanza, `history_too_long`) y, entre sus 10 transacciones más antiguas, la primera en la que recibe lamports en
+  una transacción que paga otra dirección: esa es su financiadora. Si las últimas 1.000 firmas de la financiadora
+  caben en menos de 24 h se clasifica `high_volume` y no se usa para vincular.
+- **Vínculos**: `funded_by` (la financiadora es otra dirección conocida), `same_funder` (misma financiadora
+  `wallet`) y `co_buy` (compras de la misma semilla a ≤ 1 slot en ≥ 2 semillas). Las entidades son componentes
+  conexos. Indican posible control común, no lo prueban, y no se dan de baja automáticamente del ranking: se
+  señalan para que no cuenten como confirmaciones independientes.
+- **Insiders en descubrimiento**: `funded_by_creator`, `funded_creator`, `shares_funder_with_creator` y
+  `linked_to_creator`; como las marcas de lanzamiento, excluyen al candidato salvo que se pidan.
+- **Copiabilidad**: `price_move_{5,30,60}s` = precio de la primera operación escaneada a partir de ese desfase
+  ÷ precio de la compra − 1 (solo dentro de las primeras N operaciones escaneadas); `size_vs_curve` = SOL de la
+  compra ÷ SOL de la bonding curve antes de ella.
+
 ## Muestra y consistencia
 
 El win rate observado es `ciclos con PnL > 0 / ciclos cerrados evaluables`; break-even permanece en el denominador.

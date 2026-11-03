@@ -153,7 +153,8 @@ def price_trades(session, wallet: str, prices, *, max_requests: int = 20) -> dic
                 gross = quote * sol_usd if sol_usd is not None else None
             else:
                 gross = quote  # stablecoin at par
-            fees = Decimal(d["network_fee_sol"]) * sol_usd if sol_usd is not None else None
+            fee_sol = Decimal(d["network_fee_sol"]) + Decimal(d.get("tip_sol", "0"))  # network fee + Jito tip
+            fees = fee_sol * sol_usd if sol_usd is not None else None
             usd = {"sol_usd": str(sol_usd) if candle else None,
                    "sol_usd_range": [candle.low, candle.high] if candle else None,
                    "candle_minute": candle.minute if candle else None, "candle_offset_seconds": offset,

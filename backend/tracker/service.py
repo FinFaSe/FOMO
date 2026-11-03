@@ -45,7 +45,8 @@ def store_trades(session, wallet: str, raw: RawTransaction) -> int:
     for e in events:
         details = {"token_amount": str(e["token_amount"]), "decimals": e["decimals"], "quote_asset": e["quote_asset"],
                    "quote_amount": _text(e["quote_amount"]), "price": _text(e["price"]),
-                   "network_fee_sol": str(e["network_fee_sol"]), "venues": e["venues"], "issues": e["issues"],
+                   "network_fee_sol": str(e["network_fee_sol"]), "tip_sol": str(e["tip_sol"]),
+                   "venues": e["venues"], "issues": e["issues"],
                    "evidence": {"trade": e["trade"], "usd": "unknown", "market_cap": "unknown",
                                 "payload_sha256": raw.digest, "rpc_source": raw.source}}
         session.add(Trade(wallet=wallet, signature=raw.signature, event_index=e["event_index"], mint=e["mint"],
@@ -440,7 +441,8 @@ def _sol_fill(t: Trade) -> Fill:
     sol = Decimal(d["quote_amount"]) if d["quote_asset"] == "SOL" and d["quote_amount"] is not None else None
     return Fill(signature=t.signature, event_index=t.event_index, token=t.mint,
                 timestamp=datetime.fromtimestamp(t.block_time, timezone.utc), kind=t.kind,
-                quantity=Decimal(d["token_amount"]), gross_usd=sol, fees_usd=Decimal(d["network_fee_sol"]),
+                quantity=Decimal(d["token_amount"]), gross_usd=sol,
+                fees_usd=Decimal(d["network_fee_sol"]) + Decimal(d.get("tip_sol", "0")),
                 market_cap_usd=None, source_url=f"https://solscan.io/tx/{t.signature}", slot=t.slot,
                 evidence={**d["evidence"], "quote_asset": d["quote_asset"], "issues": d["issues"]})
 
@@ -479,7 +481,7 @@ def chain_positions(session, wallet: str, as_of: datetime, days: int) -> dict:
             "evaluable": p.evaluable and not issues, "issues": sorted(issues),
             "fills": [{"signature": f.signature, "event_index": f.event_index, "kind": f.kind,
                        "timestamp": f.timestamp.isoformat(), "quantity": str(f.quantity),
-                       "quote_sol": _text(f.gross_usd), "network_fee_sol": str(f.fees_usd),
+                       "quote_sol": _text(f.gross_usd), "fees_sol": str(f.fees_usd),
                        "trade": f.evidence["trade"], "transaction_url": f.source_url} for f in p.fills],
         })
     closed = [p for p in output if p["status"] == "closed" and p["closed_at"] >= since.isoformat()]

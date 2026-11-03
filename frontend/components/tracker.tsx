@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import type { Analysis, Candidate, ChainPositions, ChainTrade, Config, Filters, Job, Observation, OpenPositions, Seed, Wallet, WorkerStatus } from "./types";
+import type { Analysis, Candidate, ChainPositions, ChainTrade, Config, Filters, Job, Observation, OpenPositions, Seed, Wallet, WalletLinks, WorkerStatus } from "./types";
 
 const initial: Filters = { max_entry_market_cap_usd: "250000", min_realized_roi_pct: "500",
   min_win_rate: 0.6, min_evaluable_positions: 30, analysis_days: 90, conservative_win_rate: true };
@@ -17,7 +17,11 @@ const ago = (s: string | null) => { if (!s) return "—"; const m = Math.round((
 const jobStates: Record<string, string> = { queued: "En cola", running: "Sincronizando", cancel_requested: "Cancelando…",
   done: "Completado", failed: "Falló", cancelled: "Cancelado" };
 const seedStates: Record<string, string> = { queued: "En cola", scanning: "Escaneando", done: "Escaneada", failed: "Falló" };
-const flagNames: Record<string, string> = { creator: "Creador", launch_tx: "Compra en la creación", launch_slot: "Mismo bloque del lanzamiento" };
+const flagNames: Record<string, string> = { creator: "Creador", launch_tx: "Compra en la creación", launch_slot: "Mismo bloque del lanzamiento",
+  funded_by_creator: "Financiada por el creador", funded_creator: "Financió al creador", shares_funder_with_creator: "Mismo financiador que el creador",
+  linked_to_creator: "Vinculada al creador" };
+const botNames: Record<string, string> = { likely_bot: "Probable bot / MEV", possible_bot: "Posible bot", none: "Sin señales de bot" };
+const linkNames: Record<string, string> = { same_funder: "mismo financiador", funded_by: "financiada por", co_buy: "compran juntas" };
 const basisNames: Record<string, string> = { scanned_trades: "operaciones escaneadas", current_quote: "cotización actual", declared: "declarado" };
 const kinds: Record<string, string> = { buy: "Compra", sell: "Venta", transfer_in: "Entrada", transfer_out: "Salida" };
 const pct = (n: number | null | undefined) => n == null ? "Sin datos" : `${(n * 100).toFixed(1)}%`;
@@ -42,6 +46,7 @@ const reasons: Record<string, string> = {
   unresolved_inventory_or_transfer_risk: "Transferencias o inventario sin resolver",
   no_evaluable_closed_positions: "Aún no hay posiciones cerradas evaluables",
   incomplete_position_coverage: "Hay cierres excluidos por costos o inventario desconocidos; podrían ocultar pérdidas",
+  bot_or_mev_behavior: "Comportamiento de bot o MEV: no es una señal copiable",
 };
 const components: Record<string, string> = {
   temporal_consistency: "Consistencia temporal / 25", big_winner_frequency: "Ganadores ≥ umbral / 20",
@@ -91,7 +96,8 @@ export default function Tracker() {
   const [worker, setWorker] = useState<WorkerStatus | null>(null);
   const [jobsVersion, setJobsVersion] = useState(0);
   const [verifyOffset, setVerifyOffset] = useState(0);
-  const [rankings, setRankings] = useState<{ address: string; label: string; metrics: Analysis["metrics"] }[]>([]);
+  const [rankings, setRankings] = useState<{ address: string; label: string; metrics: Analysis["metrics"]; entity: { size: number } | null }[]>([]);
+  const [links, setLinks] = useState<WalletLinks | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -126,10 +132,11 @@ export default function Tracker() {
 
   useEffect(() => {
     let active = true;
-    setAnalysis(null); setObservations([]); setObservationTotal(0); setChain(null); setTrades([]); setOpenPositions(null);
+    setAnalysis(null); setObservations([]); setObservationTotal(0); setChain(null); setTrades([]); setOpenPositions(null); setLinks(null);
     if (selected) {
       // Current quotes come from an external source: their failure must not hide the rest of the profile.
       api<OpenPositions>(`/wallets/${selected}/open-positions`).then(op => { if (active) setOpenPositions(op); }).catch(() => {});
+      api<WalletLinks>(`/wallets/${selected}/links`).then(l => { if (active) setLinks(l); }).catch(() => {});
       Promise.all([api<Analysis>(`/wallets/${selected}/analysis?${query(filters)}`),
         api<{ items: Observation[]; total: number }>(`/wallets/${selected}/observations?limit=20&offset=${observationOffset}`),
         api<ChainPositions>(`/wallets/${selected}/chain-positions?days=${filters.analysis_days}`),
@@ -357,6 +364,12 @@ export default function Tracker() {
                   ].map(([k,v]) => <div key={k}><span>{k}</span><strong>{v}</strong></div>)}</div>
                   <div className="evidence-box">{analysis.eligible ? <p><strong>Cumple todos los criterios con evidencia verificada</strong></p> : <><strong>Lo que falta para clasificar esta wallet</strong><ul>{analysis.exclusion_reasons.map(r => <li key={r}>{reasons[r] || r}</li>)}</ul></>}
                     <span>ROI +500% = 6×. Las posiciones abiertas y las transferencias sin costo conocido no cuentan como aciertos.</span></div>
+                  {analysis.behavior && <div className={`sync-note ${analysis.behavior.classification !== "none" ? "risk" : ""}`}>
+                    <strong>{botNames[analysis.behavior.classification] || analysis.behavior.classification}</strong> · {analysis.behavior.same_block_round_trips} compra-venta en ≤2 bloques · {analysis.behavior.fast_round_trips} posiciones de ≤60 s ({pct(analysis.behavior.fast_round_trip_share)}) · máx. {analysis.behavior.max_trades_per_day} operaciones/día</div>}
+                  {links && <div className="sync-note">{links.funding?.state === "done" ? <>Financiada por <a href={`https://solscan.io/account/${links.funding.funder}`} target="_blank" rel="noreferrer"><code>{short(links.funding.funder || "")}</code></a>{links.funding.funder_kind === "high_volume" ? " (alto volumen: exchange o servicio, no vincula)" : ""}</>
+                      : links.funding?.state === "unknown" ? `Origen de fondos desconocido (${links.funding.reason})` : links.funding ? "Origen de fondos: búsqueda en cola" : "Origen de fondos sin buscar"}
+                    {links.entity ? <> · <span className="risk">Grupo vinculado de {links.entity.size} wallets ({[...new Set(links.entity.links.map(l => linkNames[l.reason] || l.reason))].join(", ")}): {links.entity.members.filter(m => m !== selected).map(short).join(", ")}</span></> : " · sin wallets vinculadas conocidas"}
+                    {links.funded.length > 0 && <> · financió a {links.funded.length} wallet(s) conocidas</>}</div>}
                   <h3>PnL realizado acumulado <span className="micro">{analysis.metrics.verified_data_fraction === 1 ? "VERIFICADO" : "INCLUYE DATOS DECLARADOS"} · NO ES CAPITAL TOTAL</span></h3><PnlChart points={analysis.realized_pnl_curve}/>
                   <details className="method-details"><summary>Desglose del score exploratorio</summary><p>No es un score validado. Riesgo de copia desconocido; replicabilidad sin medir.</p>
                     {Object.entries(analysis.score.components).map(([k,v]) => <div className="score-row" key={k}><span>{components[k] || k}</span><strong>{v.toFixed(2)}</strong></div>)}
@@ -468,21 +481,23 @@ export default function Tracker() {
               <label className="checkbox"><input type="checkbox" checked={discoveryOptions.include_flagged} onChange={e => setDiscoveryOptions({ ...discoveryOptions, include_flagged: e.target.checked })}/> Incluir creadores y compras en el bloque del lanzamiento</label>
             </div>
             {!candidateList?.items.length ? <div className="small-empty">{candidateList?.seeds ? "Ninguna wallet cumple los filtros." : "Escanea al menos una semilla para ver candidatos."}</div> :
-              <div className="table-wrap"><table><thead><tr><th>Wallet</th><th>Semillas</th><th>Aciertos / fallos</th><th>Wilson 95%</th><th>Minutos tras lanzamiento</th><th>Rango mediano</th><th>Marcas</th><th></th></tr></thead><tbody>{candidateList.items.map(x => <tr key={x.wallet}>
+              <div className="table-wrap"><table><thead><tr><th>Wallet</th><th>Semillas</th><th>Aciertos / fallos</th><th>Wilson 95%</th><th>Minutos tras lanzamiento</th><th>Rango mediano</th><th>Copiar 30 s después</th><th>Tamaño vs curva</th><th>Marcas</th><th></th></tr></thead><tbody>{candidateList.items.map(x => <tr key={x.wallet}>
                 <td><a href={`https://solscan.io/account/${x.wallet}`} target="_blank" rel="noreferrer"><code>{short(x.wallet)} ↗</code></a></td>
                 <td className="mono">{x.seeds}</td>
                 <td className="mono">{x.hits} / {x.misses}{x.unknown ? <small> · {x.unknown} sin dato</small> : null}{x.declared_peak_hits ? <small className="risk"> · {x.declared_peak_hits} con pico declarado</small> : null}</td>
                 <td className="mono">{pct(x.hit_rate_ci95[0])} – {pct(x.hit_rate_ci95[1])}</td>
                 <td className="mono">{x.median_minutes_after_launch == null ? "—" : x.median_minutes_after_launch.toFixed(1)}</td>
                 <td className="mono">{x.median_rank}</td>
-                <td>{x.flags.length ? <small className="risk">{x.flags.map(f => flagNames[f] || f).join(" · ")}</small> : <small>—</small>}</td>
+                <td className="mono" title="Mediana de cuánto había subido el precio 30 s después de su compra">{x.median_price_move_30s == null ? "—" : `${Number(x.median_price_move_30s) >= 0 ? "+" : ""}${(Number(x.median_price_move_30s) * 100).toFixed(0)}%`}</td>
+                <td className="mono">{x.median_size_vs_curve == null ? "—" : pct(Number(x.median_size_vs_curve))}</td>
+                <td>{x.entity || x.flags.length ? <small className="risk">{[...(x.entity ? [`Grupo de ${x.entity.size}`] : []), ...x.flags.map(f => flagNames[f] || f)].join(" · ")}</small> : <small>—</small>}</td>
                 <td>{x.tracked ? <button className="quiet" onClick={() => { setSelected(x.wallet); setTab("overview"); }}>Ver perfil →</button> : <button className="secondary" disabled={!!busy} onClick={() => study(x.wallet)}>Estudiar</button>}</td></tr>)}</tbody></table></div>}
           </section>
         </>}
 
         {tab === "rankings" && <section className="panel"><div className="section-heading"><h2>Ranking de evidencia validada</h2><span className="badge">{rankings.length} RESULTADOS</span></div>
           <p className="muted">No utiliza el PnL reportado por FOMO para clasificar. Se exige historial normalizado completo y prueba de costos, ventas y capitalización de entrada.</p>
-          {!rankings.length ? <div className="empty"><div className="empty-icon">↗</div><h2>Aún no hay traders que superen la verificación.</h2><p>Una clasificación vacía es el resultado correcto cuando falta evidencia. Descubre candidatos y examina su historial desde el explorador.</p><button className="secondary" onClick={() => setTab("overview")}>Investigar wallets →</button></div> : rankings.map(r => <button className="ranking-row" key={r.address} onClick={() => {setSelected(r.address); setTab("overview");}}>{r.label || short(r.address)}<span>{pct(r.metrics.win_rate)} · {r.metrics.evaluable_positions} posiciones</span></button>)}
+          {!rankings.length ? <div className="empty"><div className="empty-icon">↗</div><h2>Aún no hay traders que superen la verificación.</h2><p>Una clasificación vacía es el resultado correcto cuando falta evidencia. Descubre candidatos y examina su historial desde el explorador.</p><button className="secondary" onClick={() => setTab("overview")}>Investigar wallets →</button></div> : rankings.map(r => <button className="ranking-row" key={r.address} onClick={() => {setSelected(r.address); setTab("overview");}}>{r.label || short(r.address)}<span>{pct(r.metrics.win_rate)} · {r.metrics.evaluable_positions} posiciones{r.entity ? ` · vinculada con ${r.entity.size - 1} wallet(s): no son confirmaciones independientes` : ""}</span></button>)}
         </section>}
 
         {tab === "sources" && <div className="sources-grid"><section className="panel"><div className="section-heading"><h2>Fuentes disponibles</h2><span className="badge">SIN SCRAPING PRIVADO</span></div>

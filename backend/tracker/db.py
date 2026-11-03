@@ -241,6 +241,27 @@ class EarlyBuy(Base):
     details: Mapped[dict] = mapped_column(JSON)
 
 
+class WalletFunding(Base):
+    """Who sent an address its first SOL (funding origin), looked up from its oldest transactions."""
+
+    __tablename__ = "wallet_funding"
+    address: Mapped[str] = mapped_column(String(44), primary_key=True)
+    # queued → scanning → done | unknown (history too long, no incoming SOL) | failed
+    state: Mapped[str] = mapped_column(String(20), index=True, default="queued")
+    funder: Mapped[str | None] = mapped_column(String(44), nullable=True, index=True)
+    # wallet | high_volume (exchange, router or bot: funds too many unrelated wallets to link them)
+    funder_kind: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    signature: Mapped[str | None] = mapped_column(String(88), nullable=True)
+    block_time: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    lamports: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    requested_by: Mapped[str] = mapped_column(String(20), default="manual")
+    locked_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    heartbeat_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+    fetched_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
 class AnalysisSnapshot(Base):
     __tablename__ = "analysis_snapshots"
     id: Mapped[str] = mapped_column(String(64), primary_key=True)

@@ -21,7 +21,8 @@ QUEUE = f"/api/wallets/{WALLET}/jobs"
 
 
 def worker(c, rpc, **kwargs):
-    options = {"worker_id": "test-worker", "refresh_minutes": 0, "progress_interval": 0, **kwargs}
+    options = {"worker_id": "test-worker", "refresh_minutes": 0, "progress_interval": 0, "lookup_funding": False,
+               **kwargs}
     return Worker(c.app.state.sessions, rpc, c.app.state.prices, **options)
 
 

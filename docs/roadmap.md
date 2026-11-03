@@ -20,7 +20,8 @@ Implementado: primera ruta funcional de investigación, no la totalidad de la es
 5. **Monitoreo y alertas** (parcial: worker persistente con cola en la base de datos y refresco periódico de la
    watchlist): worker persistente, colas/Redis cuando se justifique, eventos finalizados,
    deduplicación de notificaciones, timestamps de detección/envío y latencia medida. No WebSocket perpetuo en Actions.
-6. **Convergencia y riesgo**: agrupar wallets vinculadas para evitar señales independientes falsas;
+6. **Convergencia y riesgo** (parcial: señales de bot/MEV, origen de fondos, entidades por financiación y compras
+   juntas, marcas de insider y coste de copia en descubrimiento): agrupar wallets vinculadas para evitar señales independientes falsas;
    fuentes verificables para concentración, manipulaciones aparentes y restricciones de venta.
 7. **Backtesting**: registrar primero observaciones prospectivas y cotizaciones realmente disponibles tras alertas;
    simular slippage/fees/impacto/capacidad/fallos con reloj de disponibilidad. Separar reconstrucción histórica de

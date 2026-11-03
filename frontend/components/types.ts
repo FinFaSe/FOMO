@@ -37,6 +37,8 @@ export type Analysis = {
     copy_risk: string; components: Record<string, number>; concentration_penalty_fraction: number;
   };
   realized_pnl_curve: {timestamp: string; cumulative_realized_pnl_usd: string}[];
+  behavior?: { classification: string; same_block_round_trips: number; fast_round_trips: number;
+    fast_round_trip_share: number; max_trades_per_day: number; active_days: number };
   positions: Position[];
 };
 export type Observation = {
@@ -101,5 +103,14 @@ export type Candidate = {
   wallet: string; seeds: number; hits: number; misses: number; unknown: number; hit_rate: number | null;
   hit_rate_ci95: [number | null, number | null]; declared_peak_hits: number; median_minutes_after_launch: number | null;
   median_rank: number; flags: string[]; tracked: boolean;
+  median_price_move_30s: string | null; median_size_vs_curve: string | null; entity: { id: string; size: number } | null;
   entries: { mint: string; label: string; rank: number; status: string; multiple: string | null; entry_cap_usd: string | null }[];
+};
+export type Funding = {
+  address: string; state: string; funder: string | null; funder_kind: string | null; reason: string | null;
+  lamports: string | null; block_time: string | null;
+};
+export type WalletLinks = {
+  funding: Funding | null; funded: Funding[];
+  entity: { id: string; size: number; members: string[]; links: { a: string; b: string; reason: string }[] } | null;
 };
