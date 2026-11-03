@@ -306,6 +306,66 @@ class AlertQuote(Base):
     source: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
 
+class PricePoint(Base):
+    """A swap price seen in a stored transaction (any signer): verifiable, denser than tracked trades alone."""
+
+    __tablename__ = "price_points"
+    __table_args__ = (UniqueConstraint("signature", "event_index", "signer"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mint: Mapped[str] = mapped_column(String(44), index=True)
+    signature: Mapped[str] = mapped_column(String(88))
+    event_index: Mapped[int] = mapped_column(Integer)
+    signer: Mapped[str] = mapped_column(String(44))
+    side: Mapped[str] = mapped_column(String(10))
+    slot: Mapped[int] = mapped_column(BigInteger)
+    block_time: Mapped[int | None] = mapped_column(BigInteger, nullable=True, index=True)
+    price_sol: Mapped[str] = mapped_column(String(60))
+    sol_amount: Mapped[str] = mapped_column(String(60))
+    token_amount: Mapped[str] = mapped_column(String(60))
+
+
+class PriceHistory(Base):
+    """Download state of a mint's pool candles for a time range (third-party OHLCV, resumable)."""
+
+    __tablename__ = "price_histories"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    mint: Mapped[str] = mapped_column(String(44), index=True)
+    timeframe: Mapped[str] = mapped_column(String(10))
+    requested_from: Mapped[int] = mapped_column(BigInteger)
+    requested_to: Mapped[int] = mapped_column(BigInteger)
+    # queued → fetching → done | failed (no pool, provider errors); a run out of budget returns to queued
+    state: Mapped[str] = mapped_column(String(20), index=True, default="queued")
+    pool: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    quote_mint: Mapped[str | None] = mapped_column(String(44), nullable=True)
+    dex: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    cursor: Mapped[int | None] = mapped_column(BigInteger, nullable=True)  # next `before_timestamp`
+    candles: Mapped[int] = mapped_column(Integer, default=0)
+    requests: Mapped[int] = mapped_column(Integer, default=0)
+    requested_by: Mapped[str] = mapped_column(String(20), default="manual")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    locked_by: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    heartbeat_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+    finished_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
+class PoolCandle(Base):
+    """OHLC of a pool in its quote token (SOL for SOL pairs), from a third-party source."""
+
+    __tablename__ = "pool_candles"
+    pool: Mapped[str] = mapped_column(String(64), primary_key=True)
+    timeframe: Mapped[str] = mapped_column(String(10), primary_key=True)
+    ts: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    mint: Mapped[str] = mapped_column(String(44), index=True)
+    quote_mint: Mapped[str | None] = mapped_column(String(44), nullable=True)
+    open: Mapped[str] = mapped_column(String(60))
+    high: Mapped[str] = mapped_column(String(60))
+    low: Mapped[str] = mapped_column(String(60))
+    close: Mapped[str] = mapped_column(String(60))
+    volume: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    source: Mapped[str] = mapped_column(String(200))
+
+
 class AlertState(Base):
     __tablename__ = "alert_state"
     id: Mapped[int] = mapped_column(primary_key=True)

@@ -1,5 +1,12 @@
 """All fixtures in this directory are SYNTHETIC; none describe real traders."""
 
+import os
+import tempfile
+
+# `tracker.main` builds its module-level app on import, which opens (and migrates) DATABASE_URL. Tests must
+# never touch a developer's real database, so point it at a throwaway one before any test module imports it.
+os.environ["DATABASE_URL"] = f"sqlite:///{tempfile.mkdtemp(prefix='fomo-tests-')}/import.db"
+
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 

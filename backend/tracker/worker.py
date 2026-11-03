@@ -10,6 +10,7 @@ import logging
 import signal
 import threading
 
+from .adapters.geckoterminal import GeckoTerminal
 from .adapters.prices import CoinbaseCandles
 from .adapters.quotes import DexScreenerQuotes
 from .adapters.solana import SolanaRPC
@@ -28,7 +29,7 @@ def main():
     watcher = Watcher(sessions, rpc, prices, quotes=quotes)
     if watcher.interval > 0:
         threading.Thread(target=watcher.run_forever, args=(stop,), daemon=True, name="tracker-watcher").start()
-    Worker(sessions, rpc, prices, quotes=quotes).run_forever(stop)
+    Worker(sessions, rpc, prices, quotes=quotes, history=GeckoTerminal()).run_forever(stop)
 
 
 if __name__ == "__main__":

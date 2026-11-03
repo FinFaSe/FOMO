@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import func, select, update
 
 from .adapters.fomo import FomoAPI
+from .adapters.geckoterminal import GeckoTerminal
 from .adapters.prices import CoinbaseCandles
 from .adapters.quotes import DexScreenerQuotes
 from .adapters.solana import ProviderError, SolanaRPC, digest, observe
@@ -39,6 +40,7 @@ from .db import (
 )
 from .discovery import add_seed, candidates, scan_seed, seed_json
 from .entities import enqueue_funding, entities, entity_index, funding_json, lookup_funding
+from .history import chart, enqueue_history, history_json
 from .jobs import Worker, cancel, enqueue, ensure_idle, job_json, run_inline, worker_status
 from .portfolio import open_positions
 from .pricing import price_trades
@@ -63,13 +65,13 @@ from .tokens import PUMP_PROGRAM, pump_bonding_curve
 from .watch import Watcher, push_signatures
 
 
-def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None, quotes=None) -> FastAPI:
+def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None, quotes=None, history=None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app):
         # Optional single-process mode for local use; production runs `python -m tracker.worker`.
         stop = threading.Event()
         if os.getenv("TRACKER_EMBEDDED_WORKER") == "1":
-            worker = Worker(sessions, rpc, prices, quotes=quotes)
+            worker = Worker(sessions, rpc, prices, quotes=quotes, history=history)
             threading.Thread(target=worker.run_forever, args=(stop,), daemon=True, name="tracker-worker").start()
             watcher = Watcher(sessions, rpc, prices, quotes=quotes)
             if watcher.interval > 0:
@@ -86,7 +88,8 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None, quot
     fomo = fomo or FomoAPI()
     prices = prices or CoinbaseCandles()
     quotes = quotes or DexScreenerQuotes()
-    app.state.prices, app.state.quotes = prices, quotes
+    history = history or GeckoTerminal()
+    app.state.prices, app.state.quotes, app.state.history = prices, quotes, history
     write_lock = threading.Lock()
     allowed_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
     app.add_middleware(CORSMiddleware, allow_origins=allowed_origins,
@@ -443,7 +446,55 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None, quot
             raise HTTPException(422, "No hay wallets para simular: añade alguna o indícalas")
         return historical_copy(s, wallets, delays=body.delays, size_sol=body.size_sol, slippage_bps=body.slippage_bps,
                                impact_bps_per_sol=body.impact_bps_per_sol, tx_cost_sol=body.tx_cost_sol,
-                               max_staleness_seconds=body.max_staleness_seconds, since_days=body.since_days)
+                               max_staleness_seconds=body.max_staleness_seconds, since_days=body.since_days,
+                               use_candles=body.use_candles)
+
+    @app.post("/api/backtest/prices", status_code=202)
+    def backtest_prices(body: BacktestRequest, s=Depends(session)):
+        """Queue pool candles around every traded token of the wallets (the worker downloads them)."""
+        wallets = body.wallets or list(s.scalars(select(Wallet.address).where(Wallet.favorite.is_(True)))) \
+            or list(s.scalars(select(Wallet.address)))
+        since = int(datetime.now(timezone.utc).timestamp()) - body.since_days * 86400
+        clusters: dict[str, list[list[int]]] = {}
+        for t in s.scalars(select(Trade).where(Trade.wallet.in_(wallets), Trade.kind.in_(("buy", "sell")),
+                                               Trade.block_time >= since).order_by(Trade.block_time)):
+            groups = clusters.setdefault(t.mint, [])
+            if groups and t.block_time - groups[-1][1] <= 86400:
+                groups[-1][1] = t.block_time
+            else:
+                groups.append([t.block_time, t.block_time])
+        queued = []
+        for mint, groups in clusters.items():
+            for start, end in groups:
+                row = enqueue_history(s, mint, start - 1800, end + 6 * 3600, "backtest")
+                if row is not None:
+                    queued.append(history_json(row))
+        return {"mints": len(clusters), "requests": queued}
+
+    @app.get("/api/prices/{mint}/chart")
+    def price_chart(mint: str, wallet: str | None = None, start: int | None = Query(None, alias="from"),
+                    end: int | None = Query(None, alias="to"), s=Depends(session)):
+        try:
+            address(mint)
+            if wallet:
+                address(wallet)
+        except ValueError:
+            raise HTTPException(422, "Dirección Solana inválida") from None
+        return chart(s, mint, wallet, start, end)
+
+    @app.post("/api/prices/{mint}/history", status_code=202)
+    def queue_price_history(mint: str, start: int = Query(..., alias="from"), end: int = Query(..., alias="to"),
+                            s=Depends(session)):
+        try:
+            address(mint)
+        except ValueError:
+            raise HTTPException(422, "Dirección Solana inválida") from None
+        if end <= start:
+            raise HTTPException(422, "El rango de tiempo es inválido")
+        row = enqueue_history(s, mint, start, end, "manual")
+        if row is None:
+            raise HTTPException(422, "Rango fuera del historial disponible (últimos ~6 meses)")
+        return history_json(row)
 
     @app.get("/api/backtest/prospective")
     def backtest_prospective(slippage_bps: Decimal = Query(Decimal(100), ge=0, le=5000), s=Depends(session)):

@@ -21,6 +21,7 @@ from .adapters.solana import ProviderError
 from .analytics import wilson
 from .db import DiscoverySeed, EarlyBuy, TokenMint, TokenQuote, Wallet, WalletFunding, now_iso
 from .entities import enqueue_funding, entity_index
+from .history import enqueue_history, record_price_points, refresh_seed_peak
 from .normalize import normalize
 from .portfolio import refresh_quotes
 from .pricing import _market_cap, load_candles, sol_usd
@@ -170,6 +171,7 @@ def _scan(session, rpc, prices, quotes, seed, report):
             for event in normalize(raw.payload, signer):
                 if event["mint"] == seed.mint and event["kind"] in ("buy", "sell"):
                     events.append((raw, signer, event))
+    report["price_points"] = record_price_points(session, events)  # every trader's prices, not only buyers
     times = [raw.block_time for raw, _, _ in events if raw.block_time is not None]
     cache, requests, issues = load_candles(session, prices, times) if times else ({}, 0, [])
     report["issues"] += issues
@@ -258,6 +260,12 @@ def _scan(session, rpc, prices, quotes, seed, report):
     # Funding origins of the creator and the first buyers feed the insider and linked-wallet checks.
     buyers = list(dict.fromkeys(r.wallet for r in rows))[:FUNDING_BUYERS]
     report["funding_queued"] = enqueue_funding(session, [seed.creator, *buyers], "discovery")
+    # Pool candles: minute detail for the first day (early trading) and the whole life for the real peak.
+    if seed.launch_time:
+        now = int(datetime.now(timezone.utc).timestamp())
+        enqueue_history(session, seed.mint, seed.launch_time - 60, seed.launch_time + 86400, "discovery")
+        enqueue_history(session, seed.mint, seed.launch_time - 60, now, "discovery")
+    refresh_seed_peak(session, seed.mint, prices)  # candles already stored (e.g. a rescan) refine the peak
     report["state"], report["early_buys"] = "done", len(rows)
 
 

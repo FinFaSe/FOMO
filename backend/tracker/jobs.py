@@ -23,6 +23,7 @@ from .backtest import capture_quotes
 from .db import Job, Trade, Wallet, WorkerHeartbeat, now_iso
 from .discovery import claim_seed, recover_stale_seeds, scan_seed
 from .entities import claim_funding, enqueue_funding, lookup_funding, recover_stale_funding
+from .history import claim_history, fetch_history
 from .pricing import price_trades
 from .schemas import JobRequest, SyncRequest
 from .service import ingest
@@ -262,11 +263,11 @@ def worker_status(session) -> dict:
 
 
 class Worker:
-    def __init__(self, sessions, rpc, prices, *, quotes=None, lookup_funding: bool = True,
+    def __init__(self, sessions, rpc, prices, *, quotes=None, lookup_funding: bool = True, history=None,
                  worker_id: str | None = None,
                  refresh_minutes: float | None = None, poll_seconds: float = 2.0, progress_interval: float = 1.0):
         self.sessions, self.rpc, self.prices, self.quotes = sessions, rpc, prices, quotes
-        self.lookup_funding = lookup_funding
+        self.lookup_funding, self.history = lookup_funding, history
         self.id = worker_id or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:6]}"
         if refresh_minutes is None:
             refresh_minutes = float(os.getenv("TRACKER_REFRESH_MINUTES", "30"))
@@ -284,8 +285,8 @@ class Worker:
         session.commit()
 
     def run_once(self):
-        """Housekeeping plus at most one unit of work: a sync job, else a seed scan, else a funding lookup.
-        Returns what ran (Job, DiscoverySeed or WalletFunding), if anything."""
+        """Housekeeping plus at most one unit of work, by priority: sync job, seed scan, funding lookup, price
+        history. Returns what ran (Job, DiscoverySeed, WalletFunding or PriceHistory), if anything."""
         with self.sessions() as session:
             self.beat(session)
             deliver_pending(session)  # outbound alert webhook, if configured
@@ -306,16 +307,24 @@ class Worker:
                 report = scan_seed(session, self.rpc, self.prices, self.quotes, seed)
                 log.info("discovery: seed %s %s", seed.mint, report["state"])
                 return seed
-            if not self.lookup_funding:
+            if self.lookup_funding:
+                # Funding origins for insider and linked-wallet checks.
+                recover_stale_funding(session)
+                row = claim_funding(session, self.id)
+                if row is not None:
+                    lookup_funding(session, self.rpc, row)
+                    log.info("funding: %s %s", row.address, row.state)
+                    return row
+            if self.history is None:
                 return None
-            # Lowest priority: funding origins for insider and linked-wallet checks.
-            recover_stale_funding(session)
-            row = claim_funding(session, self.id)
-            if row is None:
+            # Lowest priority: third-party pool candles (rate limited, a few requests per run).
+            history = claim_history(session, self.id)
+            if history is None:
                 return None
-            lookup_funding(session, self.rpc, row)
-            log.info("funding: %s %s", row.address, row.state)
-            return row
+            fetch_history(session, self.history, history, self.prices)
+            log.info("price history: %s %s %s (%s candles)", history.mint, history.timeframe, history.state,
+                     history.candles)
+            return history
 
     def run(self, session, job: Job):
         wallet = session.get(Wallet, job.wallet)

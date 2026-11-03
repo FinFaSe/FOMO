@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import type { AlertItem, AlertList, Analysis, BacktestResult, Candidate, ChainPositions, ChainTrade, Config, Filters, Job, Observation, OpenPositions, ProspectiveReport, Seed, Wallet, WalletLinks, WorkerStatus } from "./types";
+import type { AlertItem, AlertList, Analysis, BacktestResult, Candidate, ChartData, ChainPositions, ChainTrade, Config, Filters, Job, Observation, OpenPositions, ProspectiveReport, Seed, Wallet, WalletLinks, WorkerStatus } from "./types";
 
 const initial: Filters = { max_entry_market_cap_usd: "250000", min_realized_roi_pct: "500",
   min_win_rate: 0.6, min_evaluable_positions: 30, analysis_days: 90, conservative_win_rate: true };
@@ -83,6 +83,31 @@ function PnlChart({ points }: { points: Analysis["realized_pnl_curve"] }) {
   </div>;
 }
 
+function PriceChart({ data }: { data: ChartData }) {
+  const prices = [...data.candles.flatMap(c => [Number(c.low), Number(c.high)]), ...data.points.map(p => Number(p.price_sol)),
+    ...data.trades.filter(t => t.price_sol && t.quote_asset === "SOL").map(t => Number(t.price_sol))].filter(v => v > 0);
+  if (!prices.length) return <div className="chart-empty">Sin precios guardados para este token en este rango.</div>;
+  // Memecoin prices move by orders of magnitude: log scale.
+  const lo = Math.log10(Math.min(...prices)), hi = Math.log10(Math.max(...prices)), span = hi - lo || 1;
+  const x = (ts: number) => 30 + (ts - data.from) / Math.max(1, data.to - data.from) * 730;
+  const y = (v: number) => 165 - (Math.log10(v) - lo) / span * 150;
+  const step = data.timeframe === "hour" ? 3600 : 60;
+  return <div className="chart">
+    <svg viewBox="0 0 780 190" role="img" aria-label="Precio del token en SOL con las operaciones de la wallet">
+      {data.candles.map(c => <line key={`c${c.ts}`} x1={x(c.ts + step / 2)} x2={x(c.ts + step / 2)} y1={y(Number(c.high))} y2={y(Number(c.low))} stroke="#5b6f63" strokeWidth="2" />)}
+      {data.candles.length > 1 && <polyline fill="none" stroke="#8fb6a0" strokeWidth="1.2" points={data.candles.map(c => `${x(c.ts + step / 2)},${y(Number(c.close))}`).join(" ")} />}
+      {data.points.map((p, i) => <circle key={`p${i}`} cx={x(p.ts)} cy={y(Number(p.price_sol))} r="1.8" fill="#c6d1c9" opacity="0.7" />)}
+      {data.trades.filter(t => t.price_sol && t.quote_asset === "SOL").map(t => {
+        const cx = x(t.ts), cy = y(Number(t.price_sol)), buy = t.kind === "buy";
+        return <path key={t.signature} d={buy ? `M${cx},${cy - 7} l6,10 l-12,0 z` : `M${cx},${cy + 7} l6,-10 l-12,0 z`} fill={buy ? "#b8ed6b" : "#e8846f"}>
+          <title>{buy ? "Compra" : "Venta"} · {date(new Date(t.ts * 1000).toISOString())} · {Number(t.price_sol).toPrecision(4)} SOL/token</title></path>;
+      })}
+      <text x="30" y="185" fill="#8c9b96" fontSize="11">{date(new Date(data.from * 1000).toISOString())}</text>
+      <text x="760" y="185" textAnchor="end" fill="#8c9b96" fontSize="11">{date(new Date(data.to * 1000).toISOString())}</text>
+    </svg>
+  </div>;
+}
+
 export default function Tracker() {
   const [tab, setTab] = useState("overview");
   const [config, setConfig] = useState<Config | null>(null);
@@ -112,6 +137,7 @@ export default function Tracker() {
   const [backtestSize, setBacktestSize] = useState("0.5");
   const [backtestSlippage, setBacktestSlippage] = useState("1");
   const [prospective, setProspective] = useState<ProspectiveReport | null>(null);
+  const [chartData, setChartData] = useState<ChartData | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -146,7 +172,7 @@ export default function Tracker() {
 
   useEffect(() => {
     let active = true;
-    setAnalysis(null); setObservations([]); setObservationTotal(0); setChain(null); setTrades([]); setOpenPositions(null); setLinks(null); setBacktest(null);
+    setAnalysis(null); setObservations([]); setObservationTotal(0); setChain(null); setTrades([]); setOpenPositions(null); setLinks(null); setBacktest(null); setChartData(null);
     if (selected) {
       // Current quotes come from an external source: their failure must not hide the rest of the profile.
       api<OpenPositions>(`/wallets/${selected}/open-positions`).then(op => { if (active) setOpenPositions(op); }).catch(() => {});
@@ -274,6 +300,23 @@ export default function Tracker() {
     return () => { active = false; if (timer) clearTimeout(timer); };
   }, [tab, alertKind, desktopAlerts]);
 
+  async function openChart(mint: string) {
+    await action("chart", async () => {
+      setChartData(await api<ChartData>(`/prices/${mint}/chart?wallet=${selected}`));
+    });
+  }
+  async function downloadCandles(data: ChartData) {
+    await action("candles", async () => {
+      await api(`/prices/${data.mint}/history?from=${data.from}&to=${data.to}`, { method: "POST" });
+      setNotice("Historial de velas en cola: el worker lo descarga (GeckoTerminal, 30 peticiones/min). Vuelve a abrir el gráfico en un rato.");
+    });
+  }
+  async function queueBacktestPrices() {
+    await action("bt-prices", async () => {
+      const r = await api<{ mints: number; requests: unknown[] }>("/backtest/prices", post({ wallets: [selected] }));
+      setNotice(`${r.requests.length} descargas de velas en cola para ${r.mints} tokens. Repite la simulación cuando el worker termine.`);
+    });
+  }
   async function runBacktest() {
     await action("backtest", async () => {
       setBacktest(await api<BacktestResult>("/backtest/historical", post({ wallets: [selected], size_sol: backtestSize,
@@ -469,10 +512,11 @@ export default function Tracker() {
               <label>Tamaño por compra (SOL)<input type="number" min="0.001" step="0.1" value={backtestSize} onChange={e => setBacktestSize(e.target.value)}/></label>
               <label>Deslizamiento (%)<input type="number" min="0" max="50" step="0.5" value={backtestSlippage} onChange={e => setBacktestSlippage(e.target.value)}/></label>
               <button className="secondary" disabled={!!busy} onClick={runBacktest}>{busy === "backtest" ? "Simulando…" : "Simular copia"}</button>
+              <button className="quiet" disabled={!!busy} onClick={queueBacktestPrices}>Descargar velas de sus tokens</button>
             </div>
             {backtest && (!backtest.leader_trades ? <div className="small-empty">Sin operaciones con contrapartida SOL en la ventana. Sincroniza la wallet primero.</div> :
-              <><p className="sync-note">{backtest.leader_trades} operaciones del líder · {backtest.observations} precios observados en la base. Pocos precios observados vuelven la simulación poco representativa.</p>
-              <div className="table-wrap"><table><thead><tr><th>Retraso</th><th>Compras copiadas</th><th>Sin precio</th><th>Cerradas</th><th>Win rate</th><th>PnL (SOL)</th><th>ROI copia</th><th>ROI líder</th><th>Diferencia</th><th>Abiertas</th></tr></thead><tbody>{backtest.results.map(r => <tr key={r.delay_seconds}>
+              <><p className="sync-note">{backtest.leader_trades} operaciones del líder · {backtest.observations} precios on-chain · {backtest.candles ?? 0} velas de pool. Sin precio on-chain en el minuto siguiente se usa la vela de forma pesimista (compra al máximo, venta al mínimo).</p>
+              <div className="table-wrap"><table><thead><tr><th>Retraso</th><th>Compras copiadas</th><th>Sin precio</th><th>Cerradas</th><th>Win rate</th><th>PnL (SOL)</th><th>ROI copia</th><th>ROI líder</th><th>Diferencia</th><th>Abiertas</th><th>Ejecución on-chain / vela</th></tr></thead><tbody>{backtest.results.map(r => <tr key={r.delay_seconds}>
                 <td className="mono">{r.delay_seconds === 0 ? "0 s (ideal)" : r.delay_seconds < 60 ? `${r.delay_seconds} s` : `${r.delay_seconds / 60} min`}</td>
                 <td className="mono">{r.filled_buys} / {r.buy_signals}</td>
                 <td className="mono">{r.unfillable_buys + r.unfillable_sells}</td>
@@ -482,7 +526,8 @@ export default function Tracker() {
                 <td className="mono">{roi(r.roi_pct)}</td>
                 <td className="mono">{roi(r.leader_roi_pct)}</td>
                 <td className="mono">{r.copy_gap_pct == null ? "—" : `${Number(r.copy_gap_pct) >= 0 ? "+" : ""}${Number(r.copy_gap_pct).toFixed(1)} pp`}</td>
-                <td className="mono">{r.open_positions}{r.open_mark_value_sol ? <small> · {sol(r.open_mark_value_sol)}</small> : null}</td></tr>)}</tbody></table></div></>)}
+                <td className="mono">{r.open_positions}{r.open_mark_value_sol ? <small> · {sol(r.open_mark_value_sol)}</small> : null}</td>
+                <td className="mono">{r.delay_seconds === 0 ? "líder" : `${r.fills_chain ?? 0} / ${r.fills_candle ?? 0}`}</td></tr>)}</tbody></table></div></>)}
           </section>}
           {wallet && openPositions && openPositions.positions.length > 0 && <section className="panel transactions"><div className="section-heading"><h2>Posiciones abiertas</h2>
               <span className="micro">PRECIO ACTUAL · {openPositions.quote_source?.replace("https://", "").toUpperCase()}</span></div>
@@ -516,14 +561,20 @@ export default function Tracker() {
               ["Posiciones abiertas", String(chain.summary.open_positions)],
             ].map(([k,v]) => <div key={k}><span>{k}</span><strong>{v}</strong></div>)}</div>
             {!chain.positions.length ? <div className="small-empty">Sin compras ni ventas detectadas. Sincroniza la wallet para analizar sus transacciones.</div> :
-              <div className="table-wrap"><table><thead><tr><th>Token</th><th>Estado</th><th>Costo</th><th>Recuperado</th><th>PnL</th><th>ROI</th><th>Observaciones</th></tr></thead><tbody>{chain.positions.map(p => <tr key={`${p.token}-${p.cycle}`}>
+              <div className="table-wrap"><table><thead><tr><th>Token</th><th>Estado</th><th>Costo</th><th>Recuperado</th><th>PnL</th><th>ROI</th><th>Observaciones</th><th></th></tr></thead><tbody>{chain.positions.map(p => <tr key={`${p.token}-${p.cycle}`}>
                 <td><a href={`https://solscan.io/token/${p.token}`} target="_blank" rel="noreferrer"><code>{short(p.token)} ↗</code></a><small> · ciclo {p.cycle}</small></td>
                 <td><span className="badge">{p.status === "open" ? "Abierta" : p.evaluable ? "Cerrada" : "No evaluable"}</span></td>
                 <td className="mono">{p.status === "open" ? <>{sol(p.remaining_cost_sol)}<small> invertido</small></> : sol(p.realized_cost_sol)}</td>
                 <td className="mono">{p.status === "open" && Number(p.realized_cost_sol) === 0 ? "—" : sol(p.realized_proceeds_sol)}</td>
                 <td className="mono">{p.status === "open" && Number(p.realized_cost_sol) === 0 ? "—" : sol(p.realized_pnl_sol)}</td>
                 <td className="mono">{roi(p.realized_roi_pct)}</td>
-                <td>{p.issues.length ? <small className="risk">{p.issues.join(", ")}</small> : <small>—</small>}</td></tr>)}</tbody></table></div>}
+                <td>{p.issues.length ? <small className="risk">{p.issues.join(", ")}</small> : <small>—</small>}</td>
+                <td><button className="quiet" disabled={!!busy} onClick={() => openChart(p.token)}>Gráfico</button></td></tr>)}</tbody></table></div>}
+            {chartData && <div className="token-chart"><h3>Precio de <code>{short(chartData.mint)}</code> <span className="micro">{chartData.candles.length ? `VELAS ${chartData.timeframe === "hour" ? "DE 1 H" : "DE 1 MIN"} EN ${chartData.quote ?? "?"} · ` : ""}{chartData.points.length} PRECIOS ON-CHAIN · ▲ COMPRAS ▼ VENTAS DE ESTA WALLET</span></h3>
+              <PriceChart data={chartData}/>
+              <p className="muted">{chartData.notice}{chartData.histories[0] ? ` Última descarga: ${chartData.histories[0].state} (${chartData.histories[0].candles} velas${chartData.histories[0].error ? `, ${chartData.histories[0].error}` : ""}).` : ""}</p>
+              <div className="toolbar">{!chartData.candles.length && <button className="secondary" disabled={!!busy} onClick={() => downloadCandles(chartData)}>Descargar velas de este rango</button>}
+                <button className="quiet" onClick={() => setChartData(null)}>Cerrar gráfico</button></div></div>}
             {trades.length > 0 && <><h3>Últimas operaciones <span className="micro">{chain.trades} EN TOTAL</span></h3>
               <div className="table-wrap"><table><thead><tr><th>Transacción</th><th>Fecha · Lima</th><th>Tipo</th><th>Token</th><th>Cantidad</th><th>Contrapartida</th><th>USD</th><th>Market cap</th><th>Venue</th><th>Evidencia</th></tr></thead><tbody>{trades.map(t => <tr key={`${t.signature}-${t.event_index}`}>
                 <td><a href={t.transaction_url} target="_blank" rel="noreferrer"><code>{short(t.signature)} ↗</code></a></td>

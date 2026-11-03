@@ -196,6 +196,7 @@ class BacktestRequest(StrictModel):
     tx_cost_sol: Decimal = Field(default=Decimal("0.0001"), ge=0, le=1, allow_inf_nan=False)
     max_staleness_seconds: int = Field(default=300, ge=1, le=86400)
     since_days: int = Field(default=90, ge=1, le=3650)
+    use_candles: bool = True  # pool candles (pessimistic fills) where no on-chain price is close enough
 
     @field_validator("wallets")
     @classmethod

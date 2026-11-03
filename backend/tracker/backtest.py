@@ -22,7 +22,8 @@ from statistics import median
 from sqlalchemy import select
 
 from .adapters.solana import ProviderError
-from .db import Alert, AlertQuote, EarlyBuy, Trade, Wallet, now_iso
+from .db import Alert, AlertQuote, EarlyBuy, PricePoint, Trade, Wallet, now_iso
+from .history import candle_index, covering_candle
 
 ONE = Decimal(1)
 ZERO = Decimal(0)
@@ -60,6 +61,10 @@ def _observations(session, mints: set[str]) -> dict[str, list[Observation]]:
         if t.block_time is None or d.get("quote_asset") != "SOL" or d.get("price") is None:
             continue
         seen[t.mint][(t.signature, t.event_index)] = Observation(t.block_time, t.slot, Decimal(d["price"]))
+    for p in session.scalars(select(PricePoint).where(PricePoint.mint.in_(sorted(mints)))):
+        if p.block_time is not None:
+            seen[p.mint].setdefault((p.signature, p.event_index), Observation(p.block_time, p.slot,
+                                                                              Decimal(p.price_sol)))
     for b in session.scalars(select(EarlyBuy).where(EarlyBuy.mint.in_(sorted(mints)))):
         if b.block_time is None or b.details.get("price_sol") is None:
             continue
@@ -112,37 +117,58 @@ def _leader_closed_roi(trades: list[Trade], mints: set[str]) -> Decimal | None:
 
 def historical_copy(session, wallets: list[str], *, delays: list[int], size_sol: Decimal, slippage_bps: Decimal,
                     impact_bps_per_sol: Decimal, tx_cost_sol: Decimal, max_staleness_seconds: int,
-                    since_days: int, as_of: datetime | None = None) -> dict:
+                    since_days: int, use_candles: bool = True, as_of: datetime | None = None) -> dict:
     as_of = as_of or datetime.now(timezone.utc)
     since = int((as_of - timedelta(days=since_days)).timestamp())
     end = int(as_of.timestamp())
     trades = [t for t in _leader_trades(session, wallets, since) if t.block_time <= end]
     observations = _observations(session, {t.mint for t in trades})
     times = {m: [o.time for o in series] for m, series in observations.items()}
+    candles = candle_index(session, {t.mint for t in trades}) if use_candles else {}
     slip = slippage_bps / Decimal(10_000)
     impact = impact_bps_per_sol / Decimal(10_000)
-    results = [_simulate(trades, observations, times, d, size_sol, slip, impact, tx_cost_sol,
+    results = [_simulate(trades, observations, times, candles, d, size_sol, slip, impact, tx_cost_sol,
                          max_staleness_seconds, end) for d in delays]
     return {"wallets": wallets, "as_of": as_of.isoformat(), "since_days": since_days, "leader_trades": len(trades),
             "observed_mints": len(observations), "observations": sum(len(v) for v in observations.values()),
+            "candle_mints": len(candles), "candles": sum(len(v[0]) for v in candles.values()),
             "params": {"delays": delays, "size_sol": str(size_sol), "slippage_bps": str(slippage_bps),
                        "impact_bps_per_sol": str(impact_bps_per_sol), "tx_cost_sol": str(tx_cost_sol),
-                       "max_staleness_seconds": max_staleness_seconds},
+                       "max_staleness_seconds": max_staleness_seconds, "use_candles": use_candles},
             "results": results,
             "limitations": [
                 "Reconstrucción histórica: precios observados en la base (operaciones guardadas y compras tempranas "
                 "escaneadas), escasos y sesgados hacia lo que se sincronizó; no es una prueba prospectiva.",
                 "Retraso 0 usa el precio del propio líder: un ideal inalcanzable, solo como referencia.",
                 "Sin observación dentro de la ventana la copia no se ejecuta; no se inventan precios.",
+                "Con velas de pool (GeckoTerminal, terceros) y sin precio on-chain en el minuto siguiente, la copia "
+                "se ejecuta de forma pesimista: compra al máximo y vende al mínimo de la vela que cubre ese momento.",
                 "Solo operaciones con contrapartida SOL; deslizamiento e impacto son supuestos configurables."]}
 
 
-def _simulate(trades, observations, times, delay, size, slip, impact, tx_cost, staleness, end) -> dict:
+EXACT_WINDOW = 60  # an on-chain price within this many seconds after the target is used as is
+
+
+def _fill(t, kind, observations, times, candles, delay, staleness):
+    """(price, time, source) for a copy of trade `t`, or None. Never uses a price before t + delay."""
+    target = t.block_time + delay
+    series, stamps = observations.get(t.mint, []), times.get(t.mint, [])
+    exact = _first_at_or_after(series, stamps, target, min(EXACT_WINDOW, staleness))
+    if exact is not None:
+        return exact.price, exact.time, "chain"
+    candle = covering_candle(candles, t.mint, target)
+    if candle is not None:  # the price at `target` lay within the candle's range: assume the worst of it
+        return Decimal(candle.high if kind == "buy" else candle.low), target, "candle"
+    later = _first_at_or_after(series, stamps, target, staleness)
+    return (later.price, later.time, "chain") if later is not None else None
+
+
+def _simulate(trades, observations, times, candles, delay, size, slip, impact, tx_cost, staleness, end) -> dict:
     leader_qty: dict[str, Decimal] = defaultdict(Decimal)
     positions: dict[str, FollowerPosition] = {}
     closed: list[FollowerPosition] = []
     counts = {"buy_signals": 0, "filled_buys": 0, "unfillable_buys": 0, "sell_signals": 0, "mirrored_sells": 0,
-              "unfillable_sells": 0}
+              "unfillable_sells": 0, "fills_chain": 0, "fills_candle": 0}
     traded_mints = set()
     for t in trades:
         d = t.details
@@ -150,8 +176,9 @@ def _simulate(trades, observations, times, delay, size, slip, impact, tx_cost, s
         if delay == 0:
             obs = Observation(t.block_time, t.slot, Decimal(d["price"]))  # ideal: the leader's own price
         else:
-            series = observations.get(t.mint, [])
-            obs = _first_at_or_after(series, times.get(t.mint, []), t.block_time + delay, staleness)
+            filled = _fill(t, t.kind, observations, times, candles, delay, staleness)
+            obs = Observation(filled[1], 0, filled[0]) if filled else None
+            source = filled[2] if filled else None
         if t.kind == "buy":
             counts["buy_signals"] += 1
             leader_qty[t.mint] += amount
@@ -164,8 +191,10 @@ def _simulate(trades, observations, times, delay, size, slip, impact, tx_cost, s
             pos.qty += size / price
             pos.cost += size + tx_cost
             pos.fills.append({"kind": "buy", "leader_time": t.block_time, "fill_time": obs.time,
-                              "price_sol": str(price)})
+                              "price_sol": str(price), "source": "leader" if delay == 0 else source})
             counts["filled_buys"] += 1
+            if delay:
+                counts[f"fills_{source}"] += 1
             traded_mints.add(t.mint)
             continue
         counts["sell_signals"] += 1
@@ -189,8 +218,11 @@ def _simulate(trades, observations, times, delay, size, slip, impact, tx_cost, s
         pos.qty -= sell_qty
         pos.cost -= allocated
         pos.fills.append({"kind": "sell", "leader_time": t.block_time, "fill_time": obs.time,
-                          "price_sol": str(obs.price), "fraction": str(fraction)})
+                          "price_sol": str(obs.price), "fraction": str(fraction),
+                          "source": "leader" if delay == 0 else source})
         counts["mirrored_sells"] += 1
+        if delay:
+            counts[f"fills_{source}"] += 1
         if pos.qty <= 0 or fraction == ONE:
             closed.append(pos)
             del positions[t.mint]

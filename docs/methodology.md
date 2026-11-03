@@ -150,10 +150,24 @@ retraso de `finalized`. Sin `as_of` explícito, el análisis y el ranking usan e
   nunca uno anterior. Retraso 0 usa el precio del líder (referencia ideal). El ROI del líder se calcula sobre los
   mismos mints cerrados por la copia. Limitación principal: las observaciones son escasas y sesgadas hacia lo
   sincronizado.
+- **Con historial de precios**: para un objetivo `t + d`, primero un precio on-chain (operaciones guardadas, puntos de
+  precio de transacciones escaneadas, compras tempranas) en `[t + d, t + d + min(60 s, staleness)]`; si no hay, la
+  vela de pool de 1 min que cubre `t + d` (el precio real estuvo en su rango) con ejecución pesimista: compra al
+  máximo y vende al mínimo; si tampoco, el primer precio on-chain dentro de `staleness`. Solo velas cotizadas en SOL.
+  Las velas son de un tercero (GeckoTerminal) y se identifican como tales en cada ejecución (`source`).
 - **Seguimiento prospectivo**: cotizaciones registradas al crear cada alerta de compra/venta y 5 y 60 min después
   (se guarda la hora real de captura). Entrada = cotización de la alerta × (1 + deslizamiento); salida a 5/60 min o
   a la cotización de la siguiente alerta de venta del mismo líder y mint, × (1 − deslizamiento). Es la única
   evaluación sin información futura; la reconstrucción histórica no la sustituye.
+
+## Historial de precios
+
+- `price_points`: compras/ventas con contrapartida SOL en transacciones guardadas, por firmante (normalizador
+  vigente). Son hechos on-chain verificables.
+- `pool_candles`: OHLC del pool más profundo de cada token donde es token base (preferencia por cotización SOL),
+  en moneda de cotización (`currency=token`), de GeckoTerminal. Datos de terceros: se usan para el pico de las
+  semillas (`peak_basis = pool_ohlcv`, con el suministro verificado de pump.fun o el estimado) y para ejecuciones
+  pesimistas del backtest; nunca como evidencia de una operación.
 
 ## Muestra y consistencia
 

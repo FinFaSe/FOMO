@@ -183,12 +183,25 @@ La correlación entre tokens aún puede reducir la independencia. Ver [método](
      guarda la cotización real (DEX Screener) al momento y 5 y 60 min después (`alert_quotes`). Se mide la
      rentabilidad de comprar al recibir la alerta (con deslizamiento) a 5 min, a 60 min y al vender el líder. Sin
      información futura; gana valor a medida que se acumulan alertas.
-9. Opcional: importa un ledger JSON documentado. Si la cadena ya aporta el evento de la misma firma y mint,
+9. **Historial de precios por pool**:
+   - **Precios on-chain** (`price_points`): cada compra o venta con contrapartida SOL que aparece en transacciones
+     guardadas, de cualquier firmante (el escaneo de semillas ve a muchos traders no seguidos). Verificables.
+   - **Velas de pool** (`pool_candles`, GeckoTerminal, público, 30 peticiones/min, ~6 meses gratis): datos de
+     terceros, etiquetados. Se piden como rangos (`price_histories`) que el worker descarga hacia atrás con la
+     prioridad más baja y retoma donde lo dejó: velas de 1 min para rangos de hasta 3 días y de 1 h para más. Se
+     elige el pool más profundo con cotización en SOL. Se encolan solas para cada semilla (primer día en minutos y
+     toda su vida en horas), desde el backtest («Descargar velas de sus tokens», `POST /api/backtest/prices`) o a
+     mano (`POST /api/prices/{mint}/history?from=&to=`).
+   - **Usos**: el backtest usa un precio on-chain si hay uno en el minuto siguiente y, si no, la vela que cubre ese
+     momento de forma **pesimista** (compra al máximo, vende al mínimo; `use_candles`); el pico de cada semilla pasa
+     a ser el máximo de sus velas (`pool_ohlcv`) cuando supera las otras cotas; y el perfil muestra un **gráfico**
+     del token (velas, precios on-chain y las compras ▲ y ventas ▼ de la wallet; `GET /api/prices/{mint}/chart`).
+10. Opcional: importa un ledger JSON documentado. Si la cadena ya aporta el evento de la misma firma y mint,
    prevalece el de la cadena.
    La importación es una declaración externa, **no** evidencia verificada por sí misma.
-10. **Verificar ledger** comprueba fecha y delta neto del token contra el RPC. No valida
+11. **Verificar ledger** comprueba fecha y delta neto del token contra el RPC. No valida
    automáticamente que fuera un swap ni sus precios históricos USD o capitalización.
-11. Examina métricas exploratorias, exclusiones y snapshot; añade wallets a la watchlist.
+12. Examina métricas exploratorias, exclusiones y snapshot; añade wallets a la watchlist.
 
 Formato del ledger (números decimales como strings; ver modelo `LedgerImport` en OpenAPI):
 
@@ -241,6 +254,7 @@ Variables opcionales:
 | `SOLANA_RPC_URL` | RPC HTTPS, por defecto `https://api.mainnet-beta.solana.com` |
 | (sin variable) | Precios: `https://api.exchange.coinbase.com`, público y sin clave |
 | (sin variable) | Cotizaciones actuales: `https://api.dexscreener.com`, público y sin clave |
+| (sin variable) | Velas de pool: `https://api.geckoterminal.com`, público y sin clave (30/min) |
 | `FOMO_API_KEY` | Bearer para `api.fomoapi.io`, solo servidor |
 | `BACKEND_URL` | En Next, por defecto `http://127.0.0.1:8000` |
 | `TRACKER_ACCESS_TOKEN` | Opcional: protege la API; Next lo adjunta del lado servidor |
