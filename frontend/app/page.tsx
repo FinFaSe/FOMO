@@ -1,3 +1,3 @@
-import Tracker from "@/components/tracker";
+import AuthGate from "@/components/auth";
 
-export default function Page() { return <Tracker />; }
+export default function Page() { return <AuthGate />; }

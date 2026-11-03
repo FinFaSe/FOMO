@@ -428,6 +428,58 @@ class RankingEntry(Base):
     compute_ms: Mapped[int] = mapped_column(Integer)
 
 
+class User(Base):
+    """A person who signs in to the dashboard (TRACKER_AUTH=on). Roles: viewer < analyst < admin."""
+
+    __tablename__ = "users"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    username: Mapped[str] = mapped_column(String(64), unique=True)
+    password_hash: Mapped[str] = mapped_column(String(200))
+    role: Mapped[str] = mapped_column(String(20))
+    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    failed_logins: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+    last_login_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
+class UserSession(Base):
+    """A signed-in browser. Only the SHA-256 of the cookie value is stored."""
+
+    __tablename__ = "user_sessions"
+    token_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    created_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+    expires_at: Mapped[str] = mapped_column(String(40), index=True)  # absolute limit
+    last_seen_at: Mapped[str] = mapped_column(String(40), default=now_iso)  # idle limit counts from here
+
+
+class ApiToken(Base):
+    """A personal token for scripts (`Authorization: Bearer trk_…`); only its SHA-256 is stored."""
+
+    __tablename__ = "api_tokens"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    name: Mapped[str] = mapped_column(String(80))
+    created_at: Mapped[str] = mapped_column(String(40), default=now_iso)
+    last_used_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class AuditEvent(Base):
+    """Who did what: sign-ins, account changes and every state-changing request."""
+
+    __tablename__ = "audit_events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    at: Mapped[str] = mapped_column(String(40), default=now_iso, index=True)
+    username: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    action: Mapped[str] = mapped_column(String(120))
+    status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ip: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    details: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+
 class SourceCapture(Base):
     """Provider response retained privately; never re-served as a raw FOMO dataset."""
 

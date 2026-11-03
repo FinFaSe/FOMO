@@ -19,6 +19,10 @@ services:
       SOLANA_RPC_URL: ${SOLANA_RPC_URL:-https://api.mainnet-beta.solana.com}
       FOMO_API_KEY: ${FOMO_API_KEY:-}
       TRACKER_ACCESS_TOKEN: ${TRACKER_ACCESS_TOKEN:-}
+      # Sign-in for the dashboard and the API: required before the instance is reachable by anyone else.
+      TRACKER_AUTH: ${TRACKER_AUTH:-off}
+      TRACKER_COOKIE_SECURE: ${TRACKER_COOKIE_SECURE:-1}
+      TRACKER_RATE_LIMIT_PER_MINUTE: ${TRACKER_RATE_LIMIT_PER_MINUTE:-600}
       TRACKER_HOOK_SECRET: ${TRACKER_HOOK_SECRET:-}
       TRACKER_ALERT_WEBHOOK_URL: ${TRACKER_ALERT_WEBHOOK_URL:-}
       TRACKER_ALERT_WEBHOOK_FORMAT: ${TRACKER_ALERT_WEBHOOK_FORMAT:-json}

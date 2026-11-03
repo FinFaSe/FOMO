@@ -209,3 +209,32 @@ class BacktestRequest(StrictModel):
         if any(v < 0 or v > 86400 for v in values):
             raise ValueError("Los retrasos deben estar entre 0 y 86400 segundos")
         return sorted(set(values))
+
+
+Role = Literal["viewer", "analyst", "admin"]
+
+
+class LoginRequest(StrictModel):
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
+
+
+class PasswordChange(StrictModel):
+    current_password: str = Field(min_length=1, max_length=256)
+    new_password: str = Field(min_length=1, max_length=256)
+
+
+class TokenCreate(StrictModel):
+    name: str = Field(min_length=1, max_length=80)
+
+
+class UserCreate(StrictModel):
+    username: str = Field(min_length=3, max_length=64)
+    password: str = Field(min_length=1, max_length=256)
+    role: Role = "viewer"
+
+
+class UserUpdate(StrictModel):
+    role: Role | None = None
+    active: bool | None = None
+    password: str | None = Field(default=None, min_length=1, max_length=256)

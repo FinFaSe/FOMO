@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import type { AlertItem, AlertList, Analysis, BacktestResult, Candidate, ChartData, ChainPositions, ChainTrade, Config, Filters, Job, Observation, OpenPositions, ProspectiveReport, Seed, Wallet, WalletLinks, WorkerStatus } from "./types";
+import AccountPanel from "./account";
+import { UNAUTHORIZED_EVENT } from "./session";
+import type { AlertItem, AlertList, Analysis, AuthStatus, BacktestResult, Candidate, ChartData, ChainPositions, ChainTrade, Config, Filters, Job, Observation, OpenPositions, ProspectiveReport, Seed, Wallet, WalletLinks, WorkerStatus } from "./types";
 
 const initial: Filters = { max_entry_market_cap_usd: "250000", min_realized_roi_pct: "500",
   min_win_rate: 0.6, min_evaluable_positions: 30, analysis_days: 90, conservative_win_rate: true };
@@ -36,6 +38,7 @@ const date = (s: string) => new Intl.DateTimeFormat("es-PE", { dateStyle: "mediu
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const r = await fetch(`/api${path}`, { ...init, headers: { "Content-Type": "application/json" }, cache: "no-store" });
   const body = await r.json();
+  if (r.status === 401) window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));  // back to the sign-in screen
   if (!r.ok) throw new Error(typeof body.detail === "string" ? body.detail : "Datos inválidos. Revisa el formato y los campos obligatorios.");
   return body;
 }
@@ -108,7 +111,7 @@ function PriceChart({ data }: { data: ChartData }) {
   </div>;
 }
 
-export default function Tracker() {
+export default function Tracker({ auth, onSignOut }: { auth: AuthStatus; onSignOut: () => void }) {
   const [tab, setTab] = useState("overview");
   const [config, setConfig] = useState<Config | null>(null);
   const [wallets, setWallets] = useState<Wallet[]>([]);
@@ -381,7 +384,8 @@ export default function Tracker() {
   }
   const tabs = [{id: "overview", name: "Explorador", icon: "◈"}, {id: "rankings", name: "Ranking validado", icon: "↗"},
     {id: "discovery", name: "Descubrimiento", icon: "⌕"}, {id: "alerts", name: "Alertas", icon: "◉"}, {id: "watchlist", name: "Watchlist", icon: "☆"},
-    {id: "sources", name: "Fuentes y método", icon: "◎"}];
+    {id: "sources", name: "Fuentes y método", icon: "◎"},
+    ...(auth.mode === "on" ? [{id: "account", name: auth.user?.role === "admin" ? "Usuarios y cuenta" : "Cuenta", icon: "◐"}] : [])];
 
   return <div className="shell">
     <aside className="sidebar">
@@ -396,8 +400,12 @@ export default function Tracker() {
       <header className="topbar"><span>Investigación <span className="slash">/</span> {tabs.find(t => t.id === tab)?.name}</span>
         <div className="pills"><div className="network-pill" title={worker?.alive ? `Watchlist cada ${worker.workers[0]?.info?.refresh_minutes ?? "?"} min` : "Sin worker: las sincronizaciones quedan en cola"}>
           <span className={worker?.alive ? "status-dot" : "status-dot muted-dot"} />{worker?.alive ? `Worker activo${worker.queued ? ` · ${worker.queued} en cola` : ""}` : "Worker detenido"}</div>
-          <div className="network-pill"><span className={config ? "status-dot" : "status-dot muted-dot"} />{config ? "Backend conectado" : "Conectando…"}</div></div></header>
+          <div className="network-pill"><span className={config ? "status-dot" : "status-dot muted-dot"} />{config ? "Backend conectado" : "Conectando…"}</div>
+          {auth.mode === "on" && auth.user ? <><div className="network-pill" title={`Sesión iniciada con ${auth.user.via === "token" ? "token personal" : "contraseña"}`}>{auth.user.username} · {auth.roles[auth.user.role]}</div>
+            <button className="quiet" onClick={onSignOut}>Salir</button></>
+            : <div className="network-pill warning-pill" title="TRACKER_AUTH=off: cualquiera que alcance esta instancia puede usarla. Activa TRACKER_AUTH=on antes de exponerla.">Sin login</div>}</div></header>
       <div className="content">
+        {auth.user?.role === "viewer" && <div className="message" role="status"><span>Modo lectura: tu rol (lector) permite consultar, pero no sincronizar, editar la watchlist ni lanzar procesos.</span></div>}
         <div className="page-heading"><div><div className="eyebrow">EVIDENCIA ANTES QUE RENDIMIENTO</div>
           <h1>Encuentra habilidad.<br className="mobile-break"/><span> Exige pruebas.</span></h1>
           <p>Entradas tempranas, beneficios realizados y consistencia que puedas verificar.</p></div>
@@ -686,6 +694,8 @@ export default function Tracker() {
           {rankingInfo && <p className="muted">Precalculado por wallet: solo se recalcula cuando cambian sus datos. {rankingInfo.precomputed.wallets} wallets al día{rankingInfo.precomputed.recomputed_now ? ` · ${rankingInfo.precomputed.recomputed_now} recalculadas en esta consulta` : ""}.</p>}
           {!rankings.length ? <div className="empty"><div className="empty-icon">↗</div><h2>Aún no hay traders que superen la verificación.</h2><p>Una clasificación vacía es el resultado correcto cuando falta evidencia. Descubre candidatos y examina su historial desde el explorador.</p><button className="secondary" onClick={() => setTab("overview")}>Investigar wallets →</button></div> : rankings.map(r => <button className="ranking-row" key={r.address} onClick={() => {setSelected(r.address); setTab("overview");}}>{r.label || short(r.address)}<span>{pct(r.metrics.win_rate)} · {r.metrics.evaluable_positions} posiciones{r.entity ? ` · vinculada con ${r.entity.size - 1} wallet(s): no son confirmaciones independientes` : ""}</span></button>)}
         </section>}
+
+        {tab === "account" && auth.mode === "on" && <AccountPanel auth={auth} />}
 
         {tab === "sources" && <div className="sources-grid"><section className="panel"><div className="section-heading"><h2>Fuentes disponibles</h2><span className="badge">SIN SCRAPING PRIVADO</span></div>
           <article className="source-card"><span className="source-icon">◎</span><div><h3>Solana JSON-RPC</h3><span className="badge green">Público · sin clave</span><p>Firmas, transacciones finalizadas, fees de red, balances de tokens y datos de cada mint (suministro, autoridades, cuenta de bonding curve de pump.fun). No proporciona por sí solo precios históricos USD, market cap de entrada ni un historial de swaps normalizado.</p><a href="https://solana.com/docs/rpc/http/gettransaction" target="_blank" rel="noreferrer">Documentación oficial ↗</a></div></article>

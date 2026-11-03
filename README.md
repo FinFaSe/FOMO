@@ -241,6 +241,42 @@ El bloque anterior es una **plantilla**, no datos de operaciones reales. `kind` 
 No restar slippage nuevamente si ya está reflejado en el efectivo recuperado.
 Campos opcionales `fdv_usd` y `liquidity_usd` se conservan como declaraciones, sin convertirlos en market cap.
 
+## Acceso y usuarios
+
+Por defecto (`TRACKER_AUTH=off`) no hay login: pensado para uso local, el dashboard lo avisa con «Sin login» y
+**no se debe exponer así**. Con `TRACKER_AUTH=on` toda la API exige una sesión iniciada o un token personal, salvo
+`/api/health`, `/api/auth/status`, `/api/auth/login` y el webhook de proveedores (que tiene su propio secreto).
+
+- **Roles**: *lector* consulta todo; *analista* además opera (sincronizar, watchlist, semillas, importaciones,
+  backtests, marcar alertas); *administrador* además gestiona usuarios y ve la auditoría. Las rutas nuevas quedan,
+  por defecto, en lectura para GET y analista para escrituras.
+- **Primer administrador** (no hay credenciales por defecto), con la misma `DATABASE_URL` que la API:
+
+  ```bash
+  cd backend
+  uv run python -m tracker.users create TU_USUARIO --role admin
+  ```
+
+  `list`, `set-role`, `disable`, `enable` y `reset-password` sirven para recuperar el acceso sin la API. El resto se
+  gestiona desde la pestaña «Usuarios y cuenta».
+- **Contraseñas**: scrypt con sal aleatoria; mínimo 12 caracteres y sin contener el usuario. Cinco intentos fallidos
+  bloquean la cuenta 15 min; el mensaje de error no revela si el usuario existe.
+- **Sesiones**: cookie `tracker_session` `HttpOnly`, `Secure` (salvo `TRACKER_COOKIE_SECURE=0`), `SameSite=Strict`;
+  caducan tras 12 h sin uso y a los 7 días. En la base solo se guarda su SHA-256. Cambiar la contraseña cierra las
+  demás sesiones; cambiar el rol, restablecer la contraseña o desactivar a un usuario cierra todas las suyas (y
+  desactivar revoca sus tokens). Siempre queda al menos un administrador activo.
+- **Tokens personales** para scripts (`Authorization: Bearer trk_…`): mismo rol que su usuario, se muestran una vez,
+  revocables.
+- **Límites** (en memoria, por proceso de la API): `TRACKER_RATE_LIMIT_PER_MINUTE` peticiones por usuario (600) y
+  10 intentos de login por minuto y dirección.
+- **Auditoría**: inicios de sesión (también los fallidos), cambios de cuentas y tokens, y cada petición que escribe
+  (usuario, ruta, estado e IP).
+
+Antes de exponer una instancia: `TRACKER_AUTH=on`; HTTPS en un proxy inverso delante de Next que envíe
+`X-Forwarded-For`; `TRACKER_ACCESS_TOKEN` igual en API y Next (la API solo confía en esa cabecera cuando llega con
+el token, y no debe ser accesible directamente); el primer administrador creado; y `TRACKER_HOOK_SECRET` si se usa
+el webhook.
+
 ## Fuentes y credenciales
 
 El RPC público funciona sin clave, pero limita mucho: en la validación del 3 de noviembre de 2026 respondió
@@ -291,7 +327,11 @@ Variables opcionales:
 | (sin variable) | Velas de pool: `https://api.geckoterminal.com`, público y sin clave (30/min) |
 | `FOMO_API_KEY` | Bearer para `api.fomoapi.io`, solo servidor |
 | `BACKEND_URL` | En Next, por defecto `http://127.0.0.1:8000` |
-| `TRACKER_ACCESS_TOKEN` | Opcional: protege la API; Next lo adjunta del lado servidor |
+| `TRACKER_ACCESS_TOKEN` | Secreto compartido entre Next y la API (Next lo adjunta del lado servidor) |
+| `TRACKER_AUTH` | `on`: login, roles y auditoría (obligatorio antes de exponer la instancia); `off` por defecto |
+| `TRACKER_COOKIE_SECURE` | `0` permite la cookie de sesión sin HTTPS (solo redes de prueba) |
+| `TRACKER_RATE_LIMIT_PER_MINUTE` | Peticiones por usuario y minuto con login activo (600) |
+| `TRACKER_TRUST_FORWARDED` | `1`: confiar en `X-Forwarded-For` sin el token de Next (detrás de otro proxy de confianza) |
 | `CORS_ORIGINS` | Orígenes locales permitidos, separados por comas |
 | `TRACKER_AUTO_MIGRATE` | `0`: no migrar al arrancar; solo comprobar que la base está al día |
 | `TRACKER_REFRESH_MINUTES` | Worker: intervalo de resincronización de la watchlist (30; 0 desactiva) |
@@ -334,6 +374,8 @@ npm run build
 npm run typecheck
 # Con FastAPI y Next ya levantados; usa Chromium instalado o PLAYWRIGHT_CHROMIUM_PATH.
 npm run test:e2e
+# Con TRACKER_AUTH=on, la prueba de login usa un administrador de prueba:
+TEST_ADMIN_USERNAME=… TEST_ADMIN_PASSWORD=… npm run test:e2e
 ```
 
 Los fixtures unitarios son **sintéticos y exclusivos de pruebas**; nunca se cargan en la aplicación.

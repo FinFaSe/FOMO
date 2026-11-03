@@ -154,3 +154,11 @@ export type ChartData = {
   trades: { ts: number; kind: string; price_sol: string | null; quote_asset: string | null; token_amount: string; signature: string }[];
   histories: { id: number; timeframe: string; state: string; candles: number; error: string | null }[];
 };
+export type Role = "viewer" | "analyst" | "admin";
+export type AuthStatus = {
+  mode: "on" | "off"; authenticated: boolean; setup_required: boolean;
+  user: { username: string; role: Role; via: string } | null; roles: Record<Role, string>;
+};
+export type UserItem = { id: number; username: string; role: Role; active: boolean; created_at: string; last_login_at: string | null; locked: boolean };
+export type TokenItem = { id: number; name: string; created_at: string; last_used_at: string | null; revoked: boolean; token?: string };
+export type AuditItem = { id: number; at: string; user: string | null; action: string; status: number | null; ip: string | null; details: Record<string, unknown> | null };

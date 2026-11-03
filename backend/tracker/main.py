@@ -11,7 +11,10 @@ from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import func, select, update
+from starlette.concurrency import run_in_threadpool
 
+from . import auth
+from .accounts import build_router
 from .adapters.fomo import FomoAPI
 from .adapters.geckoterminal import GeckoTerminal
 from .adapters.prices import CoinbaseCandles
@@ -99,18 +102,60 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None, quot
     app.state.prices, app.state.quotes, app.state.history = prices, quotes, history
     write_lock = threading.Lock()
     allowed_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000").split(",")
-    app.add_middleware(CORSMiddleware, allow_origins=allowed_origins,
-                      allow_methods=["GET", "POST", "PATCH"], allow_headers=["Content-Type", "X-Tracker-Token"])
+    app.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_methods=["GET", "POST", "PATCH"],
+                       allow_headers=["Content-Type", "X-Tracker-Token", "Authorization"])
+    limiter = auth.RateLimiter()
+
+    def resolve_principal(request: Request):
+        with sessions() as s:
+            return auth.resolve(s, cookie=request.cookies.get(auth.SESSION_COOKIE),
+                                authorization=request.headers.get("authorization"))
+
+    def write_audit(username: str, action: str, status: int, ip: str | None):
+        with sessions() as s:
+            auth.audit(s, username, action, status=status, ip=ip)
+
+    def too_many(retry: int) -> JSONResponse:
+        return JSONResponse(status_code=429, headers={"Retry-After": str(retry)},
+                            content={"detail": f"Demasiadas peticiones; vuelve a intentarlo en {retry} s"})
 
     @app.middleware("http")
     async def body_and_access_limits(request: Request, call_next):
         token = os.getenv("TRACKER_ACCESS_TOKEN")
+        path = request.url.path
         # Provider webhooks cannot send the dashboard token; they authenticate with their own secret.
-        exempt = request.url.path == "/api/health" or request.url.path.startswith("/api/hooks/")
+        exempt = path == "/api/health" or path.startswith("/api/hooks/")
+        proxied = False
         if token and not exempt and request.method != "OPTIONS":
             actual = request.headers.get("x-tracker-token", "")
             if not hmac.compare_digest(actual, token):
                 return JSONResponse(status_code=401, content={"detail": "Acceso no autorizado"})
+            proxied = True
+        # The client address forwarded by the dashboard proxy is trusted only when the proxy proved itself with
+        # the shared token (or TRACKER_TRUST_FORWARDED=1 behind another trusted proxy).
+        forwarded = request.headers.get("x-forwarded-for", "")
+        trusted = proxied or os.getenv("TRACKER_TRUST_FORWARDED") == "1"
+        request.state.client_ip = (forwarded.split(",")[0].strip() if trusted and forwarded
+                                   else (request.client.host if request.client else None))
+        principal = None
+        if auth.enabled():
+            if request.method == "POST" and path == "/api/auth/login":
+                allowed, retry = limiter.allow(f"login:{request.state.client_ip}", auth.LOGIN_LIMIT_PER_MINUTE)
+                if not allowed:
+                    return too_many(retry)
+            role = auth.required_role(request.method, path)
+            if role is not None:
+                principal = await run_in_threadpool(resolve_principal, request)
+                if principal is None:
+                    return JSONResponse(status_code=401, content={"detail": "Inicia sesión para continuar",
+                                                                  "auth": "required"})
+                if not principal.can(role):
+                    return JSONResponse(status_code=403, content={
+                        "detail": f"Tu rol ({auth.ROLE_NAMES[principal.role]}) no permite esta acción"})
+                allowed, retry = limiter.allow(f"user:{principal.id}", auth.request_limit())
+                if not allowed:
+                    return too_many(retry)
+                request.state.principal = principal
         if request.method in ("POST", "PATCH"):
             try:
                 if int(request.headers.get("content-length", "0")) > 3_000_000:
@@ -122,6 +167,10 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None, quot
                 return JSONResponse(status_code=413, content={"detail": "Límite de importación: 3 MB"})
             # Serialize write operations in the single-process local deployment (including provider calls).
         response = await call_next(request)
+        if principal is not None and request.method in ("POST", "PATCH") and not path.startswith(
+                ("/api/auth/", "/api/users")):  # account endpoints write their own, more detailed entries
+            await run_in_threadpool(write_audit, principal.username, f"{request.method} {path}",
+                                    response.status_code, request.state.client_ip)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Cache-Control"] = "no-store"
         return response
@@ -129,6 +178,8 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None, quot
     def session():
         with sessions() as s:
             yield s
+
+    app.include_router(build_router(session))
 
     def write_guard():
         if not write_lock.acquire(blocking=False):
