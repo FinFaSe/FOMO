@@ -127,3 +127,19 @@ export type AlertList = {
   items: AlertItem[]; unread: number; webhook_configured: boolean;
   settings: { max_age_minutes: number; convergence_min: number; convergence_minutes: number };
 };
+export type BacktestRow = {
+  delay_seconds: number; buy_signals: number; filled_buys: number; unfillable_buys: number; mirrored_sells: number;
+  unfillable_sells: number; closed_positions: number; wins: number; losses: number; win_rate: number | null;
+  invested_sol: string; realized_pnl_sol: string; roi_pct: string | null; leader_roi_pct: string | null;
+  copy_gap_pct: string | null; open_positions: number; open_cost_sol: string; open_mark_value_sol: string | null;
+};
+export type BacktestResult = {
+  leader_trades: number; observations: number; results: BacktestRow[]; limitations: string[];
+  params: { size_sol: string; slippage_bps: string; max_staleness_seconds: number };
+};
+export type HorizonSummary = { n: number; median_pct: string | null; mean_pct: string | null; hit_rate: number | null };
+export type ProspectiveReport = {
+  buy_alerts_with_entry_quote: number; median_quote_lateness_seconds: number | null; notice: string;
+  horizons: Record<string, HorizonSummary>;
+  wallets: ({ wallet: string; label: string } & Record<string, HorizonSummary>)[];
+};

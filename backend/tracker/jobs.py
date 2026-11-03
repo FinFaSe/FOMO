@@ -19,6 +19,7 @@ from sqlalchemy import func, select, update
 
 from .adapters.solana import ProviderError
 from .alerts import deliver_pending, generate_alerts
+from .backtest import capture_quotes
 from .db import Job, Trade, Wallet, WorkerHeartbeat, now_iso
 from .discovery import claim_seed, recover_stale_seeds, scan_seed
 from .entities import claim_funding, enqueue_funding, lookup_funding, recover_stale_funding
@@ -288,6 +289,7 @@ class Worker:
         with self.sessions() as session:
             self.beat(session)
             deliver_pending(session)  # outbound alert webhook, if configured
+            capture_quotes(session, self.quotes)  # due prospective quotes (also done by the watcher)
             recover_stale(session)
             if self.refresh and time.monotonic() >= self.next_schedule:
                 schedule_refresh(session, self.refresh, JobRequest())

@@ -24,7 +24,9 @@ Implementado: primera ruta funcional de investigación, no la totalidad de la es
 6. **Convergencia y riesgo** (parcial: señales de bot/MEV, origen de fondos, entidades por financiación y compras
    juntas, marcas de insider y coste de copia en descubrimiento): agrupar wallets vinculadas para evitar señales independientes falsas;
    fuentes verificables para concentración, manipulaciones aparentes y restricciones de venta.
-7. **Backtesting**: registrar primero observaciones prospectivas y cotizaciones realmente disponibles tras alertas;
+7. **Backtesting** (parcial: reconstrucción histórica con precios observados y retrasos configurables, y
+   seguimiento prospectivo con cotizaciones registradas en cada alerta; falta un historial de precios por pool para
+   reconstrucciones más densas y simular capacidad/fallos de ejecución): registrar primero observaciones prospectivas y cotizaciones realmente disponibles tras alertas;
    simular slippage/fees/impacto/capacidad/fallos con reloj de disponibilidad. Separar reconstrucción histórica de
    observaciones prospectivas; no usar precios futuros para decidir o simular fills.
 

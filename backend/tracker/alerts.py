@@ -18,6 +18,7 @@ import httpx
 from sqlalchemy import func, select
 
 from .adapters.solana import ProviderError
+from .backtest import schedule_alert_quotes
 from .db import Alert, AlertState, RawTransaction, TokenQuote, Trade, Wallet, now_iso
 from .entities import entity_index
 
@@ -93,12 +94,16 @@ def generate_alerts(session) -> dict:
     existing = set(session.scalars(select(Alert.key).where(Alert.key.in_(
         [f"{t.kind}:{t.wallet}:{t.signature}:{t.event_index}" for t in fresh]))))
 
+    created: list[Alert] = []
+
     def add(alert: Alert):
         if alert.key in existing:
             return
         existing.add(alert.key)
         alert.delivery_state = webhook
+        alert.created_at = now_iso()
         session.add(alert)
+        created.append(alert)
         report["created"] += 1
 
     for t in fresh:
@@ -112,6 +117,8 @@ def generate_alerts(session) -> dict:
             if convergence is not None:
                 existing |= set(session.scalars(select(Alert.key).where(Alert.key == convergence.key)))
                 add(convergence)
+    session.flush()  # alert ids for the prospective quote schedule
+    schedule_alert_quotes(session, created)
     session.commit()
     return report
 

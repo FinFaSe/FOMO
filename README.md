@@ -171,12 +171,24 @@ La correlación entre tokens aún puede reducir la independencia. Ver [método](
      muestra ni se registra.
    - `GET /api/alerts`, `POST /api/alerts/read`; el dashboard muestra el contador, la lista y notificaciones
      del navegador opcionales.
-8. Opcional: importa un ledger JSON documentado. Si la cadena ya aporta el evento de la misma firma y mint,
+8. **Backtesting de copia**, en dos formas que no se mezclan:
+   - **Reconstrucción histórica** («¿Copiarla habría funcionado?» en el perfil; `POST /api/backtest/historical`):
+     copia cada operación del líder con varios retrasos (0, 5, 30, 60 y 300 s). La copia se ejecuta al **primer
+     precio observado en la base** (operaciones guardadas de cualquier wallet y compras tempranas escaneadas) a partir
+     de `t + retraso`, con deslizamiento, impacto opcional y coste por transacción; sin observación en
+     `max_staleness_seconds` (300) cuenta como «sin precio». Las ventas se copian en proporción a la del líder; lo
+     que queda abierto se valora al último precio observado. Se compara con el ROI del líder en los mismos tokens.
+     Retraso 0 es el ideal del precio del líder. Los precios observados son escasos: es una reconstrucción.
+   - **Seguimiento prospectivo** (pestaña Alertas; `GET /api/backtest/prospective`): cada alerta de compra o venta
+     guarda la cotización real (DEX Screener) al momento y 5 y 60 min después (`alert_quotes`). Se mide la
+     rentabilidad de comprar al recibir la alerta (con deslizamiento) a 5 min, a 60 min y al vender el líder. Sin
+     información futura; gana valor a medida que se acumulan alertas.
+9. Opcional: importa un ledger JSON documentado. Si la cadena ya aporta el evento de la misma firma y mint,
    prevalece el de la cadena.
    La importación es una declaración externa, **no** evidencia verificada por sí misma.
-9. **Verificar ledger** comprueba fecha y delta neto del token contra el RPC. No valida
+10. **Verificar ledger** comprueba fecha y delta neto del token contra el RPC. No valida
    automáticamente que fuera un swap ni sus precios históricos USD o capitalización.
-10. Examina métricas exploratorias, exclusiones y snapshot; añade wallets a la watchlist.
+11. Examina métricas exploratorias, exclusiones y snapshot; añade wallets a la watchlist.
 
 Formato del ledger (números decimales como strings; ver modelo `LedgerImport` en OpenAPI):
 

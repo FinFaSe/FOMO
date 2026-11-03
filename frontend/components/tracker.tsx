@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import type { AlertItem, AlertList, Analysis, Candidate, ChainPositions, ChainTrade, Config, Filters, Job, Observation, OpenPositions, Seed, Wallet, WalletLinks, WorkerStatus } from "./types";
+import type { AlertItem, AlertList, Analysis, BacktestResult, Candidate, ChainPositions, ChainTrade, Config, Filters, Job, Observation, OpenPositions, ProspectiveReport, Seed, Wallet, WalletLinks, WorkerStatus } from "./types";
 
 const initial: Filters = { max_entry_market_cap_usd: "250000", min_realized_roi_pct: "500",
   min_win_rate: 0.6, min_evaluable_positions: 30, analysis_days: 90, conservative_win_rate: true };
@@ -108,6 +108,10 @@ export default function Tracker() {
   const [unread, setUnread] = useState(0);
   const [alertKind, setAlertKind] = useState("");
   const [desktopAlerts, setDesktopAlerts] = useState(false);
+  const [backtest, setBacktest] = useState<BacktestResult | null>(null);
+  const [backtestSize, setBacktestSize] = useState("0.5");
+  const [backtestSlippage, setBacktestSlippage] = useState("1");
+  const [prospective, setProspective] = useState<ProspectiveReport | null>(null);
   const [busy, setBusy] = useState("");
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -142,7 +146,7 @@ export default function Tracker() {
 
   useEffect(() => {
     let active = true;
-    setAnalysis(null); setObservations([]); setObservationTotal(0); setChain(null); setTrades([]); setOpenPositions(null); setLinks(null);
+    setAnalysis(null); setObservations([]); setObservationTotal(0); setChain(null); setTrades([]); setOpenPositions(null); setLinks(null); setBacktest(null);
     if (selected) {
       // Current quotes come from an external source: their failure must not hide the rest of the profile.
       api<OpenPositions>(`/wallets/${selected}/open-positions`).then(op => { if (active) setOpenPositions(op); }).catch(() => {});
@@ -269,6 +273,20 @@ export default function Tracker() {
     load();
     return () => { active = false; if (timer) clearTimeout(timer); };
   }, [tab, alertKind, desktopAlerts]);
+
+  async function runBacktest() {
+    await action("backtest", async () => {
+      setBacktest(await api<BacktestResult>("/backtest/historical", post({ wallets: [selected], size_sol: backtestSize,
+        slippage_bps: String(Math.round(Number(backtestSlippage) * 100)) })));
+    });
+  }
+  useEffect(() => {
+    if (tab !== "alerts") return;
+    let active = true;
+    const load = () => api<ProspectiveReport>("/backtest/prospective").then(r => { if (active) setProspective(r); }).catch(() => {});
+    load(); const timer = setInterval(load, 30000);
+    return () => { active = false; clearInterval(timer); };
+  }, [tab]);
 
   async function markAllRead() {
     await action("read", async () => {
@@ -445,6 +463,27 @@ export default function Tracker() {
             {observationTotal > 20 && <div className="pagination"><button className="quiet" disabled={!observationOffset} onClick={() => setObservationOffset(Math.max(0,observationOffset-20))}>← Anteriores</button>
               <span>{observationOffset+1}–{Math.min(observationOffset+20,observationTotal)} de {observationTotal}</span><button className="quiet" disabled={observationOffset+20 >= observationTotal} onClick={() => setObservationOffset(observationOffset+20)}>Siguientes →</button></div>}
           </section>}
+          {wallet && <section className="panel transactions"><div className="section-heading"><h2>¿Copiarla habría funcionado?</h2><span className="micro">RECONSTRUCCIÓN HISTÓRICA</span></div>
+            <p className="muted">Simula copiar cada operación de esta wallet con distintos retrasos. La copia se ejecuta al primer precio observado en la base a partir de ese momento (con deslizamiento y costes); si no hay ninguno en 5 min, cuenta como «sin precio». Las ventas se copian en proporción. Retraso 0 es el precio del propio líder: un ideal inalcanzable.</p>
+            <div className="inline-form">
+              <label>Tamaño por compra (SOL)<input type="number" min="0.001" step="0.1" value={backtestSize} onChange={e => setBacktestSize(e.target.value)}/></label>
+              <label>Deslizamiento (%)<input type="number" min="0" max="50" step="0.5" value={backtestSlippage} onChange={e => setBacktestSlippage(e.target.value)}/></label>
+              <button className="secondary" disabled={!!busy} onClick={runBacktest}>{busy === "backtest" ? "Simulando…" : "Simular copia"}</button>
+            </div>
+            {backtest && (!backtest.leader_trades ? <div className="small-empty">Sin operaciones con contrapartida SOL en la ventana. Sincroniza la wallet primero.</div> :
+              <><p className="sync-note">{backtest.leader_trades} operaciones del líder · {backtest.observations} precios observados en la base. Pocos precios observados vuelven la simulación poco representativa.</p>
+              <div className="table-wrap"><table><thead><tr><th>Retraso</th><th>Compras copiadas</th><th>Sin precio</th><th>Cerradas</th><th>Win rate</th><th>PnL (SOL)</th><th>ROI copia</th><th>ROI líder</th><th>Diferencia</th><th>Abiertas</th></tr></thead><tbody>{backtest.results.map(r => <tr key={r.delay_seconds}>
+                <td className="mono">{r.delay_seconds === 0 ? "0 s (ideal)" : r.delay_seconds < 60 ? `${r.delay_seconds} s` : `${r.delay_seconds / 60} min`}</td>
+                <td className="mono">{r.filled_buys} / {r.buy_signals}</td>
+                <td className="mono">{r.unfillable_buys + r.unfillable_sells}</td>
+                <td className="mono">{r.closed_positions}</td>
+                <td className="mono">{pct(r.win_rate)}</td>
+                <td className="mono">{sol(r.realized_pnl_sol)}</td>
+                <td className="mono">{roi(r.roi_pct)}</td>
+                <td className="mono">{roi(r.leader_roi_pct)}</td>
+                <td className="mono">{r.copy_gap_pct == null ? "—" : `${Number(r.copy_gap_pct) >= 0 ? "+" : ""}${Number(r.copy_gap_pct).toFixed(1)} pp`}</td>
+                <td className="mono">{r.open_positions}{r.open_mark_value_sol ? <small> · {sol(r.open_mark_value_sol)}</small> : null}</td></tr>)}</tbody></table></div></>)}
+          </section>}
           {wallet && openPositions && openPositions.positions.length > 0 && <section className="panel transactions"><div className="section-heading"><h2>Posiciones abiertas</h2>
               <span className="micro">PRECIO ACTUAL · {openPositions.quote_source?.replace("https://", "").toUpperCase()}</span></div>
             <p className="muted">Valoradas al precio de mercado actual (no es precio de ejecución: vender en un pool con poca liquidez movería el precio). No forman parte de los snapshots ni del ranking.</p>
@@ -528,6 +567,23 @@ export default function Tracker() {
               <td className="mono">{a.details.market_cap_usd ? `${a.details.market_cap_status === "estimated" ? "≈ " : ""}${money(a.details.market_cap_usd)}` : "—"}</td>
               <td className="mono" title="Segundos entre el bloque y la alerta (detección entre paréntesis)">{a.alert_seconds == null ? "—" : `${Math.round(a.alert_seconds)} s`}{a.detection_seconds != null ? <small> ({Math.round(a.detection_seconds)} s)</small> : null}</td>
               <td>{a.transaction_url && <a href={a.transaction_url} target="_blank" rel="noreferrer">Transacción ↗</a>}</td></tr>)}</tbody></table></div>}
+        </section>}
+
+        {tab === "alerts" && <section className="panel transactions"><div className="section-heading"><h2>Seguimiento prospectivo</h2><span className="micro">SIN INFORMACIÓN FUTURA</span></div>
+          <p className="muted">Cada compra o venta de la watchlist guarda la cotización real en el momento de la alerta y 5 y 60 minutos después. Aquí se mide qué habría ganado quien comprara al recibir la alerta (con 1% de deslizamiento): la prueba honesta, que gana valor a medida que se acumulan alertas.</p>
+          {!prospective?.buy_alerts_with_entry_quote ? <div className="small-empty">Aún no hay alertas de compra con cotización registrada. Requiere el worker en marcha y wallets en la watchlist.</div> : <>
+            <div className="profile-metrics">{[["5 min", "5m"], ["60 min", "60m"], ["Al vender el líder", "exit_on_leader_sell"]].map(([label, key]) => {
+              const h = prospective.horizons[key];
+              return <div key={key}><span>{label} · {h.n} casos</span><strong>{h.median_pct == null ? "Sin datos" : `${Number(h.median_pct) >= 0 ? "+" : ""}${Number(h.median_pct).toFixed(1)}%`}</strong><small className="muted">mediana · acierto {pct(h.hit_rate)}</small></div>;
+            })}</div>
+            <p className="sync-note">{prospective.buy_alerts_with_entry_quote} compras con cotización de entrada · retraso mediano de captura {prospective.median_quote_lateness_seconds == null ? "—" : `${Math.round(prospective.median_quote_lateness_seconds)} s`}</p>
+            <div className="table-wrap"><table><thead><tr><th>Wallet</th><th>Casos a 60 min</th><th>Mediana 5 min</th><th>Mediana 60 min</th><th>Acierto 60 min</th><th>Al vender el líder</th></tr></thead><tbody>{prospective.wallets.slice(0, 20).map(w => <tr key={w.wallet}>
+              <td><button className="quiet" onClick={() => { setSelected(w.wallet); setTab("overview"); }}>{w.label || short(w.wallet)}</button></td>
+              <td className="mono">{w["60m"].n}</td>
+              <td className="mono">{w["5m"].median_pct == null ? "—" : `${Number(w["5m"].median_pct).toFixed(1)}%`}</td>
+              <td className="mono">{w["60m"].median_pct == null ? "—" : `${Number(w["60m"].median_pct).toFixed(1)}%`}</td>
+              <td className="mono">{pct(w["60m"].hit_rate)}</td>
+              <td className="mono">{w.exit_on_leader_sell.median_pct == null ? "—" : `${Number(w.exit_on_leader_sell.median_pct).toFixed(1)}%`}</td></tr>)}</tbody></table></div></>}
         </section>}
 
         {tab === "discovery" && <>

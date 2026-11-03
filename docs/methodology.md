@@ -138,6 +138,23 @@ retraso de `finalized`. Sin `as_of` explícito, el análisis y el ranking usan e
   con un retraso realista. Una alerta no es una recomendación: la wallet puede ser un bot o estar vinculada; esos
   datos están en su perfil.
 
+## Backtesting de copia
+
+- **Reconstrucción histórica**: operaciones del líder con contrapartida SOL en la ventana, en orden. Para un retraso
+  `d`, cada copia se ejecuta al primer precio observado del mint con `blockTime ≥ t + d` (operaciones guardadas de
+  cualquier wallet y compras tempranas de semillas) y a no más de `max_staleness_seconds`; si no hay, no se ejecuta.
+  Compra: tamaño fijo en SOL al precio × (1 + deslizamiento + impacto × tamaño) más coste por transacción. Venta:
+  la misma fracción que vende el líder de su posición (venta total si se queda en polvo o si su posición es
+  desconocida), al precio × (1 − deslizamiento − impacto × valor) menos coste. Costo promedio ponderado. Las
+  decisiones solo usan la operación del líder; el precio de ejecución es el primero observado después del retraso,
+  nunca uno anterior. Retraso 0 usa el precio del líder (referencia ideal). El ROI del líder se calcula sobre los
+  mismos mints cerrados por la copia. Limitación principal: las observaciones son escasas y sesgadas hacia lo
+  sincronizado.
+- **Seguimiento prospectivo**: cotizaciones registradas al crear cada alerta de compra/venta y 5 y 60 min después
+  (se guarda la hora real de captura). Entrada = cotización de la alerta × (1 + deslizamiento); salida a 5/60 min o
+  a la cotización de la siguiente alerta de venta del mismo líder y mint, × (1 − deslizamiento). Es la única
+  evaluación sin información futura; la reconstrucción histórica no la sustituye.
+
 ## Muestra y consistencia
 
 El win rate observado es `ciclos con PnL > 0 / ciclos cerrados evaluables`; break-even permanece en el denominador.

@@ -185,3 +185,26 @@ def hook_signatures(payload, limit: int = 100) -> list[str]:
         if candidate not in found:
             found.append(candidate)
     return found[:limit]
+
+
+class BacktestRequest(StrictModel):
+    wallets: list[str] = Field(default_factory=list, max_length=50)  # empty: watchlist, else all tracked
+    delays: list[int] = Field(default_factory=lambda: [0, 5, 30, 60, 300], min_length=1, max_length=10)
+    size_sol: Decimal = Field(default=Decimal("0.5"), gt=0, le=1000, allow_inf_nan=False)
+    slippage_bps: Decimal = Field(default=Decimal(100), ge=0, le=5000, allow_inf_nan=False)
+    impact_bps_per_sol: Decimal = Field(default=Decimal(0), ge=0, le=10000, allow_inf_nan=False)
+    tx_cost_sol: Decimal = Field(default=Decimal("0.0001"), ge=0, le=1, allow_inf_nan=False)
+    max_staleness_seconds: int = Field(default=300, ge=1, le=86400)
+    since_days: int = Field(default=90, ge=1, le=3650)
+
+    @field_validator("wallets")
+    @classmethod
+    def _wallets(cls, values):
+        return [validate_address(v) for v in values]
+
+    @field_validator("delays")
+    @classmethod
+    def _delays(cls, values):
+        if any(v < 0 or v > 86400 for v in values):
+            raise ValueError("Los retrasos deben estar entre 0 y 86400 segundos")
+        return sorted(set(values))

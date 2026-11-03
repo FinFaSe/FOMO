@@ -19,6 +19,7 @@ from .adapters.solana import ProviderError, SolanaRPC, digest, observe
 from .alerts import KINDS as ALERT_KINDS
 from .alerts import Notifier, alert_json, unread_count
 from .alerts import settings as alert_settings
+from .backtest import historical_copy, prospective_report
 from .db import (
     Alert,
     AnalysisSnapshot,
@@ -43,6 +44,7 @@ from .portfolio import open_positions
 from .pricing import price_trades
 from .schemas import (
     AlertsRead,
+    BacktestRequest,
     DiscoveryRequest,
     Filters,
     FomoResolve,
@@ -69,7 +71,7 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None, quot
         if os.getenv("TRACKER_EMBEDDED_WORKER") == "1":
             worker = Worker(sessions, rpc, prices, quotes=quotes)
             threading.Thread(target=worker.run_forever, args=(stop,), daemon=True, name="tracker-worker").start()
-            watcher = Watcher(sessions, rpc, prices)
+            watcher = Watcher(sessions, rpc, prices, quotes=quotes)
             if watcher.interval > 0:
                 threading.Thread(target=watcher.run_forever, args=(stop,), daemon=True,
                                  name="tracker-watcher").start()
@@ -432,6 +434,20 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None, quot
         changed = s.execute(query.values(read=True)).rowcount
         s.commit()
         return {"marked": changed, "unread": unread_count(s)}
+
+    @app.post("/api/backtest/historical")
+    def backtest_historical(body: BacktestRequest, s=Depends(session)):
+        wallets = body.wallets or list(s.scalars(select(Wallet.address).where(Wallet.favorite.is_(True)))) \
+            or list(s.scalars(select(Wallet.address)))
+        if not wallets:
+            raise HTTPException(422, "No hay wallets para simular: añade alguna o indícalas")
+        return historical_copy(s, wallets, delays=body.delays, size_sol=body.size_sol, slippage_bps=body.slippage_bps,
+                               impact_bps_per_sol=body.impact_bps_per_sol, tx_cost_sol=body.tx_cost_sol,
+                               max_staleness_seconds=body.max_staleness_seconds, since_days=body.since_days)
+
+    @app.get("/api/backtest/prospective")
+    def backtest_prospective(slippage_bps: Decimal = Query(Decimal(100), ge=0, le=5000), s=Depends(session)):
+        return prospective_report(s, slippage_bps=slippage_bps)
 
     @app.post("/api/hooks/transactions")
     def hook_transactions(payload: Annotated[list | dict, Body()], request: Request, s=Depends(session)):

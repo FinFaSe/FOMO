@@ -18,6 +18,7 @@ from sqlalchemy.exc import IntegrityError
 
 from .adapters.solana import ProviderError
 from .alerts import Notifier, deliver_pending, generate_alerts
+from .backtest import capture_quotes
 from .db import Observation, PendingSignature, RawTransaction, SyncState, Wallet, WorkerHeartbeat, now_iso
 from .pricing import price_trades
 from .service import record_observation, store_transaction
@@ -114,9 +115,9 @@ def retry_pending(session, rpc, prices) -> int:
 
 
 class Watcher:
-    def __init__(self, sessions, rpc, prices, *, notifier: Notifier | None = None, interval: float | None = None,
-                 watcher_id: str | None = None):
-        self.sessions, self.rpc, self.prices = sessions, rpc, prices
+    def __init__(self, sessions, rpc, prices, *, quotes=None, notifier: Notifier | None = None,
+                 interval: float | None = None, watcher_id: str | None = None):
+        self.sessions, self.rpc, self.prices, self.quotes = sessions, rpc, prices, quotes
         self.notifier = notifier or Notifier()
         self.interval = interval if interval is not None else float(os.getenv("TRACKER_WATCH_SECONDS", "20"))
         self.id = watcher_id or f"watcher:{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:6]}"
@@ -152,6 +153,8 @@ class Watcher:
             report["retried"] = retry_pending(session, self.rpc, self.prices)
             report["alerts"] = generate_alerts(session)["created"]
             deliver_pending(session, self.notifier)
+            # Prospective record: quotes at each alert and 5/60 minutes later, fetched when due.
+            report["quotes"] = capture_quotes(session, self.quotes)["captured"]
             row = session.get(WorkerHeartbeat, self.id)
             if row is None:
                 session.add(WorkerHeartbeat(id=self.id, info={"kind": "watcher", "interval_seconds": self.interval,

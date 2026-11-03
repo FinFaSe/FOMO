@@ -287,6 +287,25 @@ class Alert(Base):
     read: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class AlertQuote(Base):
+    """Market quote recorded at an alert and at fixed offsets after it (prospective, no hindsight)."""
+
+    __tablename__ = "alert_quotes"
+    __table_args__ = (UniqueConstraint("alert_id", "offset_seconds"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    alert_id: Mapped[int] = mapped_column(ForeignKey("alerts.id"), index=True)
+    mint: Mapped[str] = mapped_column(String(44), index=True)
+    offset_seconds: Mapped[int] = mapped_column(Integer)
+    due_at: Mapped[str] = mapped_column(String(40), index=True)
+    # pending → done | missing (no pair found) | failed (source kept failing)
+    status: Mapped[str] = mapped_column(String(20), index=True, default="pending")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    fetched_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    price_usd: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    liquidity_usd: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    source: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+
 class AlertState(Base):
     __tablename__ = "alert_state"
     id: Mapped[int] = mapped_column(primary_key=True)
