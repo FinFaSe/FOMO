@@ -138,7 +138,9 @@ def generate_alerts(session) -> dict:
         add(Alert(key=f"{t.kind}:{t.wallet}:{t.signature}:{t.event_index}", kind=t.kind, wallet=t.wallet,
                   mint=t.mint, signature=t.signature, event_time=t.block_time,
                   detected_at=raw.fetched_at if raw else None,
-                  details=_trade_details(t, favorites[t.wallet], groups, symbols.get(t.mint))))
+                  # First seen already finalized (a provisional alert keeps its own `detected_by` when completed).
+                  details={**_trade_details(t, favorites[t.wallet], groups, symbols.get(t.mint)),
+                           "detected_by": "finalized"}))
         if t.kind == "buy":
             convergence = _convergence(session, t, favorites, groups, cfg, symbols.get(t.mint))
             if convergence is not None:

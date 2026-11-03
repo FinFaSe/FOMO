@@ -53,6 +53,7 @@ def test_watcher_alerts_on_a_new_buy_without_moving_sync_cursors(client):  # noq
     [a] = alerts(c)["items"]
     assert (a["kind"], a["wallet"], a["mint"], a["signature"]) == ("buy", WALLET, MINT, sig)
     assert a["details"]["usd"] == "150" and a["details"]["market_cap_status"] == "verified"
+    assert a["commitment"] == "finalized" and a["details"]["detected_by"] == "finalized"
     assert 25 <= a["alert_seconds"] <= 120 and a["detection_seconds"] <= a["alert_seconds"]
     assert w.run_once()["alerts"] == 0
     with c.app.state.sessions() as s:

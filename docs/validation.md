@@ -2,6 +2,28 @@
 
 Solo se describe lo observado; no se ha probado una estrategia rentable.
 
+## 3 de noviembre de 2026: latencia de las alertas (stream WebSocket + `confirmed`)
+
+Wallets reales activas en la watchlist, el worker completo (stream, vigilante de respaldo y finalización) contra el
+RPC público y PostgreSQL 16; tiempos medidos desde la hora del bloque:
+
+| Medida | Resultado |
+| --- | --- |
+| Notificación del stream (detección) | mediana 2,0-5,5 s según la ejecución; mejor 1,1 s |
+| Alerta provisional mientras el RPC tiene capacidad | **mediana 2,2 s** (6 de las primeras 8 entre 1,3 y 2,4 s) |
+| Antes (vigilante cada 20 s + `finalized`) | ≥ 13 s de finalización + hasta 20 s de sondeo |
+| Completada como `finalized` sin cola | 20,5 s (una muestra); el importe provisional coincidió con el verificado en las 22 alertas comparadas |
+
+- Con 3 bots (~30 operaciones/min) el RPC público **no da abasto**: atendió unas 0,4 peticiones/s desde este
+  entorno (con 429), cada alerta necesita 2-4 llamadas y se forma cola (mediana 10-24 s, p90 70-106 s). La cola
+  del RPC ahora atiende primero la descarga de las alertas y después el sondeo, la finalización y las syncs, pero
+  no crea capacidad: para una watchlist de alta frecuencia hace falta un RPC de pago.
+- El endpoint WebSocket público (o el proxy de salida de este entorno) cierra la conexión cada ~40 s con un código
+  de cierre inválido; el stream reconecta en ~1 s y las alertas en curso no se pierden. Lo que se notifica durante
+  ese segundo lo recoge el vigilante.
+- El nodo que sirve `getTransaction` en `confirmed` suele ir 0,3-2 s por detrás del que notifica: el stream
+  reintenta con esperas cortas.
+
 ## 3 de noviembre de 2026: validación con datos reales
 
 ### Normalizador frente a GeckoTerminal (`python -m tracker.crosscheck`)

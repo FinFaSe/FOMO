@@ -167,7 +167,10 @@ La correlación entre tokens aún puede reducir la independencia. Ver [método](
      (`commitment = confirmed`): importes de la transacción, USD con el último SOL/USD (`≈`), sin market cap.
      ~15 s después guarda la transacción `finalized` como evidencia y **completa la misma alerta** (USD y market
      cap verificados; `finalized`). Si nunca finaliza queda `dropped`. La convergencia se calcula solo con
-     operaciones finalizadas. Reconecta solo; `TRACKER_STREAM=0` lo desactiva.
+     operaciones finalizadas. Reconecta solo; `TRACKER_STREAM=0` lo desactiva. Medido con wallets reales: alerta
+     ~2 s después del bloque mientras el RPC tiene capacidad (antes ≥ 13 s + el intervalo de sondeo). Las
+     peticiones de alertas pasan delante del resto en la cola del RPC; con watchlists de alta frecuencia el RPC
+     público no da abasto ([validación](docs/validation.md)).
    - **Vigilante de respaldo**: cada `TRACKER_WATCH_SECONDS` (20 s) pide, para cada wallet de la watchlist, las
      firmas posteriores a la última vista (en `confirmed`); lo no finalizado alerta de forma provisional igual
      que el stream y se guarda en una ronda posterior. Guarda sin mover los cursores de la sync (que luego no

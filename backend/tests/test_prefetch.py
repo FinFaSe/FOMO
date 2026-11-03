@@ -174,3 +174,24 @@ def test_a_download_that_failed_ahead_gets_a_fresh_attempt_in_turn(client):
     rpc.transaction = once
     report = c.post(SYNC, json={}).json()
     assert report["state"] == "scanned" and report["transactions"] == 3 and failed == [sigs[0]]
+
+
+def test_urgent_requests_go_before_routine_ones_already_waiting():
+    order, lock = [], threading.Lock()
+
+    def transport(request):
+        with lock:
+            order.append(json.loads(request.content)["params"][0])
+        return httpx.Response(200, json={"jsonrpc": "2.0", "id": 1, "result": {
+            "slot": 1, "transaction": {"signatures": [json.loads(request.content)["params"][0]]}}})
+
+    rpc = SolanaRPC("https://rpc.example.org", httpx.Client(transport=httpx.MockTransport(transport)),
+                    min_interval=0.1, concurrency=8)
+    routine = [threading.Thread(target=rpc.transaction, args=(f"bulk{i}",)) for i in range(6)]
+    for t in routine:
+        t.start()
+    time.sleep(0.15)  # the routine requests are queued behind the spacing
+    rpc.confirmed_transaction("alert")
+    for t in routine:
+        t.join()
+    assert order.index("alert") <= 3 and len(order) == 7  # served ahead of most of the waiting bulk requests

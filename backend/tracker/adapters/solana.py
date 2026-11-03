@@ -1,4 +1,6 @@
 import hashlib
+import heapq
+import itertools
 import json
 import os
 import threading
@@ -47,19 +49,30 @@ class SolanaRPC:
                              else float(os.getenv("SOLANA_RPC_MIN_INTERVAL", "0.3")))
         self.concurrency = max(1, concurrency if concurrency is not None
                                else int(os.getenv("SOLANA_RPC_CONCURRENCY", "6")))
-        self.lock = threading.Lock()
+        self.lock = threading.Condition()
         self.interval = self.min_interval  # current spacing, between min_interval and max_interval
         self.next_slot = 0.0
+        self.waiting: list[tuple[int, int]] = []  # (priority, arrival) of requests waiting for a slot
+        self.tickets = itertools.count()
         self._full_history: tuple[float, bool] | None = None
 
-    def _wait_turn(self):
-        """Reserve the next request slot; the request itself runs outside the lock."""
+    def _wait_turn(self, urgent: bool = False):
+        """Wait for the next request slot (spaced by `interval`). Urgent requests (the transaction behind a
+        provisional alert) are served before routine ones already waiting (syncs, watcher, finalization), so an
+        alert never queues behind bulk work. The request itself runs outside the lock."""
         with self.lock:
-            now = time.monotonic()
-            start = max(now, self.next_slot)
-            self.next_slot = start + self.interval
-        if start > now:
-            time.sleep(start - now)
+            ticket = (0 if urgent else 1, next(self.tickets))
+            heapq.heappush(self.waiting, ticket)
+            self.lock.notify_all()  # the head of the queue may have changed
+            while True:
+                now = time.monotonic()
+                head = self.waiting[0] == ticket
+                if head and now >= self.next_slot:
+                    heapq.heappop(self.waiting)
+                    self.next_slot = now + self.interval
+                    self.lock.notify_all()
+                    return
+                self.lock.wait(self.next_slot - now if head else None)
 
     def _slow_down(self, retry_after: str | None):
         """Rate limited: double the spacing for every thread and pause them all (Retry-After if given)."""
@@ -75,9 +88,9 @@ class SolanaRPC:
         with self.lock:
             self.interval = max(self.min_interval, self.interval * 0.95)
 
-    def call(self, method: str, params: list):
+    def call(self, method: str, params: list, *, urgent: bool = False):
         for attempt in range(self.attempts):
-            self._wait_turn()
+            self._wait_turn(urgent)
             try:
                 r = self.client.post(self.endpoint, json={"jsonrpc": "2.0", "id": 1, "method": method, "params": params})
             except httpx.HTTPError:
@@ -139,9 +152,9 @@ class SolanaRPC:
             raise ProviderError("Respuesta getMultipleAccounts inválida")
         return values
 
-    def transaction(self, signature: str, *, commitment: str = "finalized"):
+    def transaction(self, signature: str, *, commitment: str = "finalized", urgent: bool = False):
         result = self.call("getTransaction", [signature, {"commitment": commitment, "encoding": "jsonParsed",
-                                                         "maxSupportedTransactionVersion": 1}])
+                                                         "maxSupportedTransactionVersion": 1}], urgent=urgent)
         if result is None:
             raise ProviderError(f"Transacción no disponible en {commitment}; no se cuenta como verificada", 409)
         if signature not in result.get("transaction", {}).get("signatures", []):
@@ -151,7 +164,7 @@ class SolanaRPC:
     def confirmed_transaction(self, signature: str):
         """`confirmed` (supermajority voted, ~1 s after the block) instead of `finalized` (~13 s): for provisional
         alerts only; stored evidence stays finalized."""
-        return self.transaction(signature, commitment="confirmed")
+        return self.transaction(signature, commitment="confirmed", urgent=True)
 
     def signature_statuses(self, signatures: list[str]) -> list[dict | None]:
         """getSignatureStatuses with history search: None for a signature the cluster does not know."""
