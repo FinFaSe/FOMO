@@ -2,12 +2,13 @@ import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 
 from .adapters.solana import ProviderError, digest, observe
-from .analytics import Fill, analyze
-from .db import AnalysisSnapshot, EventRecord, Observation, RawTransaction, SyncState, Wallet, now_iso
+from .analytics import Fill, analyze, reconstruct, wilson
+from .db import AnalysisSnapshot, EventRecord, Observation, RawTransaction, SyncState, Trade, Wallet, now_iso
+from .normalize import NORMALIZER_VERSION, normalize
 from .schemas import Filters, LedgerImport, SyncRequest
 
 
@@ -33,6 +34,45 @@ def store_transaction(session, rpc, signature: str, *, refresh: bool = False) ->
     return row
 
 
+def _text(value):
+    return str(value) if value is not None else None
+
+
+def store_trades(session, wallet: str, raw: RawTransaction) -> int:
+    """Derive trade/transfer rows from stored evidence. Deterministic; no RPC call."""
+
+    events = normalize(raw.payload, wallet)
+    for e in events:
+        details = {"token_amount": str(e["token_amount"]), "quote_asset": e["quote_asset"],
+                   "quote_amount": _text(e["quote_amount"]), "price": _text(e["price"]),
+                   "network_fee_sol": str(e["network_fee_sol"]), "venues": e["venues"], "issues": e["issues"],
+                   "evidence": {"trade": e["trade"], "usd": "unknown", "market_cap": "unknown",
+                                "payload_sha256": raw.digest, "rpc_source": raw.source}}
+        session.add(Trade(wallet=wallet, signature=raw.signature, event_index=e["event_index"], mint=e["mint"],
+                          kind=e["kind"], slot=raw.slot, block_time=raw.block_time, details=details,
+                          normalizer=NORMALIZER_VERSION))
+    return len(events)
+
+
+def renormalize(session, wallet: str) -> dict:
+    """Rebuild every trade of the wallet from its stored observations, e.g. after a normalizer update."""
+
+    session.execute(delete(Trade).where(Trade.wallet == wallet))
+    rows = list(session.scalars(select(RawTransaction)
+                                .join(Observation, Observation.signature == RawTransaction.signature)
+                                .where(Observation.wallet == wallet)))
+    transactions = trades = 0
+    for raw in rows:
+        transactions += 1
+        trades += store_trades(session, wallet, raw)
+    state = session.get(SyncState, wallet)
+    if state is not None:
+        state.normalizer = NORMALIZER_VERSION
+    session.commit()
+    return {"transactions": transactions, "trades": trades, "normalizer": NORMALIZER_VERSION,
+            "rpc_calls": 0}
+
+
 def _record(session, wallet: Wallet, rpc, signature: str, report: dict, *, refresh: bool = False):
     """Store one listed signature for the wallet. Known observations cost no RPC call."""
 
@@ -55,6 +95,7 @@ def _record(session, wallet: Wallet, rpc, signature: str, report: dict, *, refre
                                      "payload_sha256": raw.digest, "fetched_at": raw.fetched_at}))
     report["transactions"] += 1
     report["failed_transactions"] += int(observation["status"] == "failed")
+    report["trades"] += store_trades(session, wallet.address, raw)
 
 
 def _missing_block_time(state: SyncState | None, report: dict):
@@ -180,7 +221,7 @@ def ingest(session, wallet: Wallet, rpc, request: SyncRequest) -> dict:
     since = int(since_dt.timestamp())
     report = {"started_at": now_iso(), "since": since_dt.isoformat(), "state": "running",
               "mode": "revalidate" if request.revalidate else "incremental",
-              "transactions": 0, "already_known": 0, "revalidated": 0, "rpc_transaction_fetches": 0,
+              "transactions": 0, "trades": 0, "already_known": 0, "revalidated": 0, "rpc_transaction_fetches": 0,
               "reused_stored_payloads": 0, "failed_transactions": 0, "pages": 0, "cursor": None,
               "signature_window_complete": False, "normalized_history_complete": False,
               "issues": [], "source": rpc.source}
@@ -199,6 +240,11 @@ def ingest(session, wallet: Wallet, rpc, request: SyncRequest) -> dict:
                 state = SyncState(wallet=wallet.address)
                 session.add(state)
                 session.commit()
+            if state.normalizer != NORMALIZER_VERSION:
+                # Wallets scanned before (or with an older normalizer) are rebuilt from stored evidence.
+                rebuilt = renormalize(session, wallet.address)
+                if rebuilt["transactions"]:
+                    report["renormalized"] = rebuilt
             initialized = state.head_signature is not None or state.history_start_reached
             caught_up = _catch_up(session, wallet, rpc, state, request, report, budget) if initialized else True
             backfilled = caught_up and _backfill(session, wallet, rpc, state, request, report, budget, since)
@@ -309,3 +355,78 @@ def wallet_analysis(session, wallet: Wallet, filters: Filters, as_of: datetime):
             if existing is None or existing.result != result:
                 raise
     return result
+
+
+ISSUE_NAMES = {"missing_historical_usd_or_fees": "missing_sol_quote"}
+
+
+def _sol_fill(t: Trade) -> Fill:
+    d = t.details
+    sol = Decimal(d["quote_amount"]) if d["quote_asset"] == "SOL" and d["quote_amount"] is not None else None
+    return Fill(signature=t.signature, event_index=t.event_index, token=t.mint,
+                timestamp=datetime.fromtimestamp(t.block_time, timezone.utc), kind=t.kind,
+                quantity=Decimal(d["token_amount"]), gross_usd=sol, fees_usd=Decimal(d["network_fee_sol"]),
+                market_cap_usd=None, source_url=f"https://solscan.io/tx/{t.signature}",
+                evidence={**d["evidence"], "quote_asset": d["quote_asset"], "issues": d["issues"]})
+
+
+def chain_positions(session, wallet: str, as_of: datetime, days: int) -> dict:
+    """Positions rebuilt from chain-derived trades, denominated in SOL. Exploratory, not a ranking input.
+
+    Reuses the weighted-average accounting of `analytics.reconstruct`; its USD fields carry SOL here.
+    """
+
+    rows = list(session.scalars(select(Trade).where(Trade.wallet == wallet)
+                                .order_by(Trade.block_time, Trade.signature, Trade.event_index)))
+    undated = sum(t.block_time is None for t in rows)
+    positions = reconstruct([_sol_fill(t) for t in rows if t.block_time is not None], as_of)
+    since = as_of - timedelta(days=days)
+    output = []
+    for p in positions:
+        issues = {ISSUE_NAMES.get(i, i) for i in p.issues}
+        for f in p.fills:
+            if f.evidence["trade"] == "inferred":
+                issues.add("inferred_trade")
+            if f.kind in ("buy", "sell") and f.evidence["quote_asset"] not in ("SOL", None):
+                issues.add("non_sol_quote")
+            issues.update(f.evidence["issues"])
+        buys = [f for f in p.fills if f.kind == "buy" and f.gross_usd is not None]
+        bought = sum((f.quantity for f in buys), Decimal(0))
+        output.append({
+            "token": p.token, "cycle": p.cycle, "status": "closed" if p.closed_at else "open",
+            "opened_at": p.opened_at.isoformat(), "closed_at": p.closed_at.isoformat() if p.closed_at else None,
+            "remaining_quantity": str(p.quantity),
+            "remaining_cost_sol": _text(p.basis) if p.money_known else None,
+            "realized_cost_sol": _text(p.allocated_cost) if p.money_known else None,
+            "realized_proceeds_sol": _text(p.proceeds) if p.money_known else None,
+            "realized_pnl_sol": _text(p.pnl), "realized_roi_pct": _text(p.roi),
+            "avg_entry_price_sol": _text(sum((f.gross_usd for f in buys), Decimal(0)) / bought) if bought else None,
+            "evaluable": p.evaluable and not issues, "issues": sorted(issues),
+            "fills": [{"signature": f.signature, "event_index": f.event_index, "kind": f.kind,
+                       "timestamp": f.timestamp.isoformat(), "quantity": str(f.quantity),
+                       "quote_sol": _text(f.gross_usd), "network_fee_sol": str(f.fees_usd),
+                       "trade": f.evidence["trade"], "transaction_url": f.source_url} for f in p.fills],
+        })
+    closed = [p for p in output if p["status"] == "closed" and p["closed_at"] >= since.isoformat()]
+    evaluable = [p for p in closed if p["evaluable"]]
+    pnls = [Decimal(p["realized_pnl_sol"]) for p in evaluable]
+    cost = sum((Decimal(p["realized_cost_sol"]) for p in evaluable), Decimal(0))
+    wins = sum(v > 0 for v in pnls)
+    rois = sorted(Decimal(p["realized_roi_pct"]) for p in evaluable)
+    low, high = wilson(wins, len(evaluable))
+    return {
+        "wallet": wallet, "as_of": as_of.isoformat(), "window_start": since.isoformat(), "denomination": "SOL",
+        "normalizer": NORMALIZER_VERSION, "trades": len(rows), "undated_trades": undated,
+        "summary": {"closed_positions": len(closed), "evaluable_positions": len(evaluable),
+                    "open_positions": sum(p["status"] == "open" for p in output),
+                    "wins": wins, "losses": sum(v < 0 for v in pnls),
+                    "win_rate": wins / len(evaluable) if evaluable else None, "win_rate_ci95": [low, high],
+                    "net_realized_pnl_sol": _text(sum(pnls, Decimal(0))) if evaluable else None,
+                    "aggregate_realized_roi_pct": _text(sum(pnls, Decimal(0)) / cost * 100) if cost else None,
+                    "median_roi_pct": _text(rois[len(rois) // 2]) if rois else None},
+        "positions": output,
+        "limitations": ["Denominado en SOL: el ROI en USD difiere si el precio de SOL cambió durante la posición.",
+                        "Sin precios USD ni market cap histórico: no alimenta el ranking validado.",
+                        "Propinas (Jito) y rent pagado a cuentas ajenas se cuentan dentro del costo del swap.",
+                        "Win rate por posición, sin agrupar por token ni ajustar correlación; exploratorio."],
+    }

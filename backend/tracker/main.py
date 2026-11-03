@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 
 from .adapters.fomo import FomoAPI
 from .adapters.solana import ProviderError, SolanaRPC, digest, observe
-from .db import AnalysisSnapshot, Observation, RawTransaction, SourceCapture, Wallet, database, now_iso
+from .db import AnalysisSnapshot, Observation, RawTransaction, SourceCapture, Trade, Wallet, database, now_iso
 from .schemas import (
     DiscoveryRequest,
     Filters,
@@ -24,7 +24,7 @@ from .schemas import (
     address,
     utc,
 )
-from .service import import_ledger, ingest, verify_ledger, wallet_analysis
+from .service import chain_positions, import_ledger, ingest, renormalize, verify_ledger, wallet_analysis
 
 
 def create_app(db_url: str | None = None, rpc=None, fomo=None) -> FastAPI:
@@ -151,6 +151,40 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None) -> FastAPI:
         count = s.scalar(select(func.count()).select_from(Observation).where(Observation.wallet == wallet))
         return {"total": count, "items": [{"signature": r.signature, "transaction_url":
                   f"https://solscan.io/tx/{r.signature}", **r.details} for r in rows]}
+
+    @app.get("/api/wallets/{wallet}/trades")
+    def trades(wallet: str, limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
+               mint: str | None = None, s=Depends(session)):
+        get_wallet(s, wallet)
+        where = [Trade.wallet == wallet]
+        if mint:
+            try:
+                where.append(Trade.mint == address(mint))
+            except ValueError:
+                raise HTTPException(422, "Mint Solana inválido") from None
+        rows = s.scalars(select(Trade).where(*where)
+                         .order_by(Trade.block_time.desc(), Trade.signature.desc(), Trade.event_index)
+                         .limit(limit).offset(offset))
+        count = s.scalar(select(func.count()).select_from(Trade).where(*where))
+        return {"total": count, "items": [
+            {"signature": t.signature, "event_index": t.event_index, "mint": t.mint, "kind": t.kind,
+             "slot": t.slot, "block_time": t.block_time, "normalizer": t.normalizer,
+             "transaction_url": f"https://solscan.io/tx/{t.signature}", **t.details} for t in rows]}
+
+    @app.post("/api/wallets/{wallet}/normalize", dependencies=[Depends(write_guard)])
+    def normalize_wallet(wallet: str, s=Depends(session)):
+        get_wallet(s, wallet)
+        return renormalize(s, wallet)
+
+    @app.get("/api/wallets/{wallet}/chain-positions")
+    def wallet_chain_positions(wallet: str, days: int = Query(90, ge=1, le=3650), as_of: datetime | None = None,
+                               s=Depends(session)):
+        try:
+            timestamp = utc(as_of) if as_of else datetime.now(timezone.utc).replace(microsecond=0)
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from None
+        get_wallet(s, wallet)
+        return chain_positions(s, wallet, timestamp, days)
 
     @app.get("/api/wallets/{wallet}/analysis")
     def analysis(wallet: str, filters: Annotated[Filters, Depends()], as_of: datetime | None = None,

@@ -26,6 +26,24 @@ la posición se marca ambigua. Una ordenación lexicográfica determinista no se
 El MVP admite movimientos finales de token; no pretende normalizar token rebasing, impuestos Token-2022, MEV,
 bundles, migraciones, perps, NFT o rutas complejas sin un adaptador específico.
 
+## Normalización on-chain (`balance-delta-v1`)
+
+Cada transacción guardada se convierte en eventos por mint a partir de los cambios netos de la wallet, no de
+decodificar instrucciones, de modo que cualquier ruta por un venue reconocido se normaliza igual.
+
+- Tramo SOL = Δlamports de la wallet + Δlamports de cada cuenta de token cuyo `owner` es la wallet + fee de red si
+  la wallet la pagó (`accountKeys[0]`). El rent de sus propias cuentas creadas o cerradas se compensa; el wSOL se
+  cuenta por los lamports de su cuenta y no por su delta de token, para no contarlo dos veces.
+- Un solo token contra una sola contrapartida de signo opuesto (SOL, USDC o USDT) es compra o venta; sin
+  contrapartida es transferencia. Token por token o varias contrapartidas conservan el inventario pero no el
+  precio (`multi_leg_swap_quote_not_allocatable`). Las transacciones fallidas no generan eventos.
+- `verified` exige programa reconocido + firma de la wallet + contrapartida identificada; si no, `inferred`.
+  Verificar la operación no verifica USD ni market cap: siguen `unknown`.
+- La fee de red se imputa al primer evento de la transacción. Las fees del venue ya están dentro del importe
+  intercambiado (precio efectivo). Propinas (Jito) y rent pagado a cuentas ajenas quedan dentro del costo.
+- Las posiciones en SOL reutilizan el costo promedio ponderado; su ROI difiere del ROI en USD si SOL se movió.
+  El win rate de esa vista es por posición, sin agrupar por token: es exploratorio.
+
 ## Muestra y consistencia
 
 El win rate observado es `ciclos con PnL > 0 / ciclos cerrados evaluables`; break-even permanece en el denominador.

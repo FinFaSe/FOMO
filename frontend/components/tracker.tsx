@@ -1,13 +1,16 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import type { Analysis, Config, Filters, Observation, Wallet } from "./types";
+import type { Analysis, ChainPositions, ChainTrade, Config, Filters, Observation, Wallet } from "./types";
 
 const initial: Filters = { max_entry_market_cap_usd: "250000", min_realized_roi_pct: "500",
   min_win_rate: 0.6, min_evaluable_positions: 30, analysis_days: 90, conservative_win_rate: true };
 const short = (s: string) => `${s.slice(0, 5)}…${s.slice(-5)}`;
 const money = (s: string | number | null | undefined) => s == null ? "Sin datos" :
   new Intl.NumberFormat("es-PE", { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format(Number(s));
+const sol = (s: string | null | undefined) => s == null ? "Sin datos" : `${Number(s).toLocaleString("es-PE", { maximumFractionDigits: 4 })} SOL`;
+const roi = (s: string | null | undefined) => s == null ? "Desconocido" : `${Number(s).toFixed(1)}%`;
+const kinds: Record<string, string> = { buy: "Compra", sell: "Venta", transfer_in: "Entrada", transfer_out: "Salida" };
 const pct = (n: number | null | undefined) => n == null ? "Sin datos" : `${(n * 100).toFixed(1)}%`;
 const date = (s: string) => new Intl.DateTimeFormat("es-PE", { dateStyle: "medium", timeStyle: "short", timeZone: "America/Lima" }).format(new Date(s));
 
@@ -72,6 +75,8 @@ export default function Tracker() {
   const [observations, setObservations] = useState<Observation[]>([]);
   const [observationTotal, setObservationTotal] = useState(0);
   const [observationOffset, setObservationOffset] = useState(0);
+  const [chain, setChain] = useState<ChainPositions | null>(null);
+  const [trades, setTrades] = useState<ChainTrade[]>([]);
   const [verifyOffset, setVerifyOffset] = useState(0);
   const [rankings, setRankings] = useState<{ address: string; label: string; metrics: Analysis["metrics"] }[]>([]);
   const [busy, setBusy] = useState("");
@@ -99,11 +104,13 @@ export default function Tracker() {
 
   useEffect(() => {
     let active = true;
-    setAnalysis(null); setObservations([]); setObservationTotal(0);
+    setAnalysis(null); setObservations([]); setObservationTotal(0); setChain(null); setTrades([]);
     if (selected) {
       Promise.all([api<Analysis>(`/wallets/${selected}/analysis?${query(filters)}`),
-        api<{ items: Observation[]; total: number }>(`/wallets/${selected}/observations?limit=20&offset=${observationOffset}`)])
-        .then(([a, o]) => { if (active) { setAnalysis(a); setObservations(o.items); setObservationTotal(o.total); } })
+        api<{ items: Observation[]; total: number }>(`/wallets/${selected}/observations?limit=20&offset=${observationOffset}`),
+        api<ChainPositions>(`/wallets/${selected}/chain-positions?days=${filters.analysis_days}`),
+        api<{ items: ChainTrade[] }>(`/wallets/${selected}/trades?limit=20`)])
+        .then(([a, o, cp, t]) => { if (active) { setAnalysis(a); setObservations(o.items); setObservationTotal(o.total); setChain(cp); setTrades(t.items); } })
         .catch(e => { if (active) setError(e.message); });
     }
     return () => { active = false; };
@@ -132,10 +139,10 @@ export default function Tracker() {
   }
   async function sync() {
     await action("sync", async () => {
-      const r = await api<{state: string; transactions: number; rpc_transaction_fetches: number; issues: string[]}>(`/wallets/${selected}/sync`,
+      const r = await api<{state: string; transactions: number; trades: number; rpc_transaction_fetches: number; issues: string[]}>(`/wallets/${selected}/sync`,
         post({ days: filters.analysis_days, max_pages: 2, page_size: 10 }));
       await reloadWallets();
-      setNotice(`${r.transactions} transacciones nuevas (${r.rpc_transaction_fetches} descargadas del RPC). ${r.state === "partial" ? "Historial parcial: " + r.issues.join(", ") + ". Vuelve a sincronizar para continuar desde el cursor." : "Ventana de firmas escaneada; falta normalización financiera completa."}`);
+      setNotice(`${r.transactions} transacciones nuevas (${r.rpc_transaction_fetches} descargadas del RPC), ${r.trades} operaciones detectadas. ${r.state === "partial" ? "Historial parcial: " + r.issues.join(", ") + ". Vuelve a sincronizar para continuar desde el cursor." : "Ventana de firmas escaneada; faltan precios USD y market cap histórico."}`);
     });
   }
   async function importFile(file: File) {
@@ -226,7 +233,7 @@ export default function Tracker() {
                     setAnalysis(await api<Analysis>(`/wallets/${selected}/analysis?${query(filters)}`));
                     setNotice(`${r.matched_movements} movimientos coinciden con la cadena. No verifica USD ni market cap. ${r.remaining_signatures ? `${r.remaining_signatures} firmas pendientes; vuelve a pulsar para continuar. ` : ""}${r.errors.map(e => e.error).join("; ")}`);
                   })}>{verifyOffset ? "Continuar verificación ↗" : "Verificar ledger ↗"}</button></div>
-                {wallet.sync && <p className="sync-note">Último escaneo: {wallet.sync.state} · {wallet.sync.transactions} transacciones · {wallet.sync.signature_window_complete ? "ventana de firmas escaneada" : "cobertura parcial"}. Normalización financiera incompleta.</p>}
+                {wallet.sync && <p className="sync-note">Último escaneo: {wallet.sync.state} · {wallet.sync.transactions} transacciones · {wallet.sync.signature_window_complete ? "ventana de firmas escaneada" : "cobertura parcial"}. Operaciones en SOL; faltan precios USD.</p>}
                 {analysis ? <>
                   <div className="profile-metrics">{[
                     ["PnL realizado declarado",money(analysis.metrics.net_realized_pnl_usd)],
@@ -257,8 +264,37 @@ export default function Tracker() {
             {observationTotal > 20 && <div className="pagination"><button className="quiet" disabled={!observationOffset} onClick={() => setObservationOffset(Math.max(0,observationOffset-20))}>← Anteriores</button>
               <span>{observationOffset+1}–{Math.min(observationOffset+20,observationTotal)} de {observationTotal}</span><button className="quiet" disabled={observationOffset+20 >= observationTotal} onClick={() => setObservationOffset(observationOffset+20)}>Siguientes →</button></div>}
           </section>}
+          {wallet && chain && <section className="panel transactions"><div className="section-heading"><h2>Operaciones on-chain</h2><span className="micro">EN SOL · EXPLORATORIO</span></div>
+            <p className="muted">Compras y ventas detectadas en las transacciones guardadas (Pump.fun, PumpSwap, Raydium, Jupiter). «Verificada» exige un programa reconocido y la firma de la wallet; sin precios USD no entran al ranking.</p>
+            <div className="profile-metrics">{[
+              ["PnL realizado (SOL)", sol(chain.summary.net_realized_pnl_sol)],
+              ["Win rate por posición", pct(chain.summary.win_rate)],
+              ["Cerradas evaluables / cerradas", `${chain.summary.evaluable_positions} / ${chain.summary.closed_positions}`],
+              ["ROI agregado", roi(chain.summary.aggregate_realized_roi_pct)],
+              ["ROI mediano", roi(chain.summary.median_roi_pct)],
+              ["Posiciones abiertas", String(chain.summary.open_positions)],
+            ].map(([k,v]) => <div key={k}><span>{k}</span><strong>{v}</strong></div>)}</div>
+            {!chain.positions.length ? <div className="small-empty">Sin compras ni ventas detectadas. Sincroniza la wallet para analizar sus transacciones.</div> :
+              <div className="table-wrap"><table><thead><tr><th>Token</th><th>Estado</th><th>Costo</th><th>Recuperado</th><th>PnL</th><th>ROI</th><th>Observaciones</th></tr></thead><tbody>{chain.positions.map(p => <tr key={`${p.token}-${p.cycle}`}>
+                <td><a href={`https://solscan.io/token/${p.token}`} target="_blank" rel="noreferrer"><code>{short(p.token)} ↗</code></a><small> · ciclo {p.cycle}</small></td>
+                <td><span className="badge">{p.status === "open" ? "Abierta" : p.evaluable ? "Cerrada" : "No evaluable"}</span></td>
+                <td className="mono">{p.status === "open" ? <>{sol(p.remaining_cost_sol)}<small> invertido</small></> : sol(p.realized_cost_sol)}</td>
+                <td className="mono">{p.status === "open" && Number(p.realized_cost_sol) === 0 ? "—" : sol(p.realized_proceeds_sol)}</td>
+                <td className="mono">{p.status === "open" && Number(p.realized_cost_sol) === 0 ? "—" : sol(p.realized_pnl_sol)}</td>
+                <td className="mono">{roi(p.realized_roi_pct)}</td>
+                <td>{p.issues.length ? <small className="risk">{p.issues.join(", ")}</small> : <small>—</small>}</td></tr>)}</tbody></table></div>}
+            {trades.length > 0 && <><h3>Últimas operaciones <span className="micro">{chain.trades} EN TOTAL</span></h3>
+              <div className="table-wrap"><table><thead><tr><th>Transacción</th><th>Fecha · Lima</th><th>Tipo</th><th>Token</th><th>Cantidad</th><th>Contrapartida</th><th>Precio</th><th>Venue</th><th>Evidencia</th></tr></thead><tbody>{trades.map(t => <tr key={`${t.signature}-${t.event_index}`}>
+                <td><a href={t.transaction_url} target="_blank" rel="noreferrer"><code>{short(t.signature)} ↗</code></a></td>
+                <td>{t.block_time == null ? "Desconocida" : date(new Date(t.block_time * 1000).toISOString())}</td>
+                <td><span className="badge">{kinds[t.kind] || t.kind}</span></td><td><code>{short(t.mint)}</code></td>
+                <td className="mono">{Number(t.token_amount).toLocaleString("es-PE")}</td>
+                <td className="mono">{t.quote_amount == null ? "—" : `${Number(t.quote_amount).toLocaleString("es-PE", { maximumFractionDigits: 6 })} ${t.quote_asset}`}</td>
+                <td className="mono">{t.price == null ? "—" : Number(t.price).toPrecision(4)}</td>
+                <td>{t.venues.join(", ") || "—"}</td><td><span className="micro">{t.evidence.trade}</span></td></tr>)}</tbody></table></div></>}
+          </section>}
           {analysis && <section className="panel transactions"><div className="section-heading"><h2>Posiciones reconstruidas</h2><span className="micro">COSTO PROMEDIO PONDERADO</span></div>
-            {!analysis.positions.length ? <div className="small-empty">Sin operaciones normalizadas. Importa un ledger documentado; no deducimos swaps de simples transferencias.</div> : analysis.positions.map(p => {
+            {!analysis.positions.length ? <div className="small-empty">Sin ledger importado. Las operaciones detectadas on-chain aparecen arriba en SOL; este análisis en USD sigue requiriendo un ledger documentado.</div> : analysis.positions.map(p => {
               const key = `${p.token}-${p.cycle}`;
               return <div className="position" key={key}><button className="position-heading" onClick={() => setExpanded(expanded === key ? "" : key)} aria-expanded={expanded === key}>
                 <span><code>{short(p.token)}</code> · ciclo {p.cycle}<small>{p.status === "open" ? "Abierta · excluida del win rate" : p.evaluable ? "Cerrada · evaluable" : "No evaluable"}</small></span>

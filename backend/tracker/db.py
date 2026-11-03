@@ -44,6 +44,8 @@ class SyncState(Base):
     catchup_before: Mapped[str | None] = mapped_column(String(88), nullable=True)
     catchup_head: Mapped[str | None] = mapped_column(String(88), nullable=True)
     missing_block_times: Mapped[int] = mapped_column(Integer, default=0)
+    # Normalizer version that produced this wallet's trades; a mismatch triggers a local rebuild.
+    normalizer: Mapped[str | None] = mapped_column(String(40), nullable=True)
     updated_at: Mapped[str] = mapped_column(String(40), default=now_iso)
 
 
@@ -79,6 +81,24 @@ class EventRecord(Base):
     payload: Mapped[dict] = mapped_column(JSON)
     # Owned by the server, deliberately absent from the public import contract.
     evidence: Mapped[dict] = mapped_column(JSON)
+
+
+class Trade(Base):
+    """Derived from stored RawTransaction evidence by tracker.normalize; rebuildable without RPC."""
+
+    __tablename__ = "trades"
+    __table_args__ = (UniqueConstraint("wallet", "signature", "event_index"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    wallet: Mapped[str] = mapped_column(ForeignKey("wallets.address"), index=True)
+    signature: Mapped[str] = mapped_column(ForeignKey("raw_transactions.signature"), index=True)
+    event_index: Mapped[int] = mapped_column(Integer)
+    mint: Mapped[str] = mapped_column(String(44), index=True)
+    kind: Mapped[str] = mapped_column(String(20))
+    slot: Mapped[int] = mapped_column(Integer)
+    block_time: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    # Decimal amounts are stored as strings to keep exact values across SQLite and PostgreSQL.
+    details: Mapped[dict] = mapped_column(JSON)
+    normalizer: Mapped[str] = mapped_column(String(40))
 
 
 class AnalysisSnapshot(Base):

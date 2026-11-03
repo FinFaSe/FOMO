@@ -9,7 +9,7 @@ export type Filters = {
 export type Wallet = {
   address: string; label: string; favorite: boolean;
   identity: { handle: string; verification: string; source: string } | null;
-  sync: { state: string; transactions: number; already_known?: number; rpc_transaction_fetches?: number;
+  sync: { state: string; transactions: number; trades?: number; already_known?: number; rpc_transaction_fetches?: number;
     signature_window_complete: boolean; issues: string[] } | null;
 };
 export type Fill = {
@@ -46,4 +46,22 @@ export type Observation = {
 };
 export type Config = {
   default_filters: Filters; fomo_api_configured: boolean; rpc_source: string; data_mode: string;
+};
+export type ChainTrade = {
+  signature: string; event_index: number; mint: string; kind: string; block_time: number | null;
+  token_amount: string; quote_asset: string | null; quote_amount: string | null; price: string | null;
+  network_fee_sol: string; venues: string[]; issues: string[]; transaction_url: string;
+  evidence: { trade: string; usd: string; market_cap: string };
+};
+export type ChainPosition = {
+  token: string; cycle: number; status: string; opened_at: string; closed_at: string | null;
+  remaining_quantity: string; remaining_cost_sol: string | null; realized_cost_sol: string | null; realized_proceeds_sol: string | null;
+  realized_pnl_sol: string | null; realized_roi_pct: string | null; avg_entry_price_sol: string | null;
+  evaluable: boolean; issues: string[];
+};
+export type ChainPositions = {
+  denomination: string; trades: number; limitations: string[]; positions: ChainPosition[];
+  summary: { closed_positions: number; evaluable_positions: number; open_positions: number; wins: number;
+    losses: number; win_rate: number | null; net_realized_pnl_sol: string | null;
+    aggregate_realized_roi_pct: string | null; median_roi_pct: string | null };
 };

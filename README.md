@@ -58,11 +58,20 @@ La correlación entre tokens aún puede reducir la independencia. Ver [método](
    descargar con `getTransaction`, tampoco las guardadas por **Verificar ledger**. Un listado vacío
    no consume el presupuesto de páginas. `{"revalidate": true}` vuelve a descargar desde la firma
    más reciente y compara el SHA-256 con la evidencia original, sin mover los cursores.
-3. Importa un ledger JSON documentado mediante el perfil para reconstruir posiciones.
+3. Revisa **Operaciones on-chain**: cada transacción guardada se normaliza sin llamadas al RPC
+   (`tracker/normalize.py`) en compras, ventas y transferencias, con su contrapartida en SOL, USDC o USDT
+   y el precio efectivo. El tramo SOL suma los lamports de la wallet y de sus cuentas de token
+   (así el rent de sus propias cuentas y el wSOL se compensan) y separa la fee de red. Una operación es
+   `verified` solo si se ejecutó un programa reconocido (Pump.fun, PumpSwap, Raydium AMM v4/CPMM/CLMM/
+   LaunchLab o Jupiter v6), la wallet firmó y hubo exactamente un token contra una contrapartida.
+   Las posiciones en SOL (`GET /api/wallets/{wallet}/chain-positions`) son exploratorias: sin USD ni
+   market cap histórico no alimentan el ranking. `POST /api/wallets/{wallet}/normalize` las reconstruye
+   desde la evidencia guardada; al cambiar la versión del normalizador se reconstruyen en la siguiente sync.
+4. Importa un ledger JSON documentado mediante el perfil para reconstruir posiciones en USD.
    La importación es una declaración externa, **no** evidencia verificada por sí misma.
-4. **Verificar ledger** comprueba fecha y delta neto del token contra el RPC. No valida
+5. **Verificar ledger** comprueba fecha y delta neto del token contra el RPC. No valida
    automáticamente que fuera un swap ni sus precios históricos USD o capitalización.
-5. Examina métricas exploratorias, exclusiones y snapshot; añade wallets a la watchlist.
+6. Examina métricas exploratorias, exclusiones y snapshot; añade wallets a la watchlist.
 
 Formato del ledger (números decimales como strings; ver modelo `LedgerImport` en OpenAPI):
 
