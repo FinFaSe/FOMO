@@ -13,7 +13,7 @@ from tracker.db import Job
 from tracker.jobs import Worker
 from tracker.main import create_app
 
-from .conftest import WALLET, b58
+from .conftest import WALLET, b58, database_url
 from .test_api import SyntheticPrices, SyntheticQuotes, SyntheticRPC
 from .test_incremental_sync import client, observations, recent  # noqa: F401  (client is a fixture)
 
@@ -183,7 +183,7 @@ def test_claim_skips_wallets_that_already_run_a_job(client):  # noqa: F811
 def test_embedded_worker_thread(tmp_path, monkeypatch):
     monkeypatch.setenv("TRACKER_EMBEDDED_WORKER", "1")
     monkeypatch.setenv("TRACKER_REFRESH_MINUTES", "0")
-    app = create_app(f"sqlite:///{tmp_path}/embedded.db", rpc=SyntheticRPC(), prices=SyntheticPrices(),
+    app = create_app(database_url(tmp_path, "embedded.db"), rpc=SyntheticRPC(), prices=SyntheticPrices(),
                      quotes=SyntheticQuotes())
     with TestClient(app) as c:
         c.post("/api/wallets", json={"address": WALLET})

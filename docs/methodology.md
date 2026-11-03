@@ -115,7 +115,9 @@ servirla equivale exactamente a recalcular. Una wallet sin sync completa se anal
   día o ≥ 50% de posiciones de ≤ 60 s con ≥ 10 cerradas; excluye del ranking. «Posible bot» (≥ 1, ≥ 100, ≥ 25% con
   ≥ 5) solo se muestra. Umbrales en `tracker/analytics.py`.
 - **Propinas Jito**: lamports que reciben las ocho cuentas de propinas de Jito en transacciones que paga la wallet;
-  se restan del tramo SOL y se suman a las fees (el PnL no cambia, el precio efectivo deja de incluirlas).
+  se restan del tramo SOL y se suman a las fees (el PnL no cambia, el precio efectivo deja de incluirlas). La
+  lista coincidió el 3 de noviembre de 2026 con `getTipAccounts` del block engine de Jito; `tracker.smoke` lo
+  vuelve a comprobar en cada ejecución.
 - **Origen de fondos**: se listan las firmas de la dirección hasta la primera (máx. 10 páginas de 1.000; si no
   alcanza, `history_too_long`) y, entre sus 10 transacciones más antiguas, la primera en la que recibe lamports en
   una transacción que paga otra dirección: esa es su financiadora. Si las últimas 1.000 firmas de la financiadora

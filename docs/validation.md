@@ -1,6 +1,30 @@
 # Validación ejecutada
 
-31 de octubre de 2026. Solo se describe lo observado; no se ha probado una estrategia rentable.
+Solo se describe lo observado; no se ha probado una estrategia rentable.
+
+## 3 de noviembre de 2026: red real (`python -m tracker.smoke`)
+
+Primera ejecución con acceso a Solana RPC público, Coinbase, DEX Screener, GeckoTerminal y el block engine de
+Jito. Tres ejecuciones: una con la wallet firmante de la transacción auditada y dos con una wallet activa en
+PumpSwap tomada de la muestra de swaps recientes (2 páginas de 20 en SQLite; 1 de 20 en PostgreSQL 16).
+Pasaron todas las comprobaciones obligatorias; las opcionales también cuando hubo tokens operados.
+
+| Comprobación | Resultado observado |
+| --- | --- |
+| Transacción auditada | Mismo slot (`463752775`) y mismo SHA-256 (`744acb70…`) que en la auditoría del 31 de octubre |
+| Normalización de swaps recientes | pump.fun, PumpSwap y Jupiter v6: todas las compras/ventas encontradas, `verified` con contrapartida SOL; ninguna incidencia ni evento inválido |
+| Esquema | En `0006_ranking` sobre SQLite y PostgreSQL |
+| Ingesta y resincronización | Sin descargar de nuevo lo guardado (observaciones = suma de ambas syncs); 65 operaciones verificadas de PumpSwap en la wallet activa |
+| Valoración | Todas las operaciones con USD (Coinbase) y market cap verificado por origen pump.fun |
+| Análisis | No elegible (pocas páginas); la wallet activa se marcó como `bot_or_mev_behavior` |
+| GeckoTerminal | Pool PumpSwap con cotización SOL; vela de 1 min × SOL/USD = precio de DEX Screener (razón 0,996): `currency=token` devuelve el precio en SOL |
+| Jito | `getTipAccounts` devuelve exactamente las 8 cuentas del normalizador |
+| RPC público | Limitó la ingesta en una ejecución (`ingesta parcial`, sin pérdida de datos): para uso continuo conviene un RPC de pago (`SOLANA_RPC_URL`) |
+
+No demuestra 90 días de historial ni 30 posiciones ganadoras; las direcciones de traders muestreadas no se
+guardan en el repositorio. La suite automática (161 pruebas) pasa en SQLite y en PostgreSQL 16.
+
+## 31 de octubre de 2026: validación inicial
 
 | Comprobación | Resultado |
 | --- | --- |

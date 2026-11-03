@@ -17,7 +17,7 @@ from tracker.db import Observation, RawTransaction
 from tracker.main import create_app
 from tracker.schemas import LedgerEvent
 
-from .conftest import AS_OF, TOKEN, WALLET, b58
+from .conftest import AS_OF, TOKEN, WALLET, b58, database_url
 
 SIG = b58(42, 64)
 
@@ -113,7 +113,7 @@ class SyntheticQuotes:
 @pytest.fixture
 def client(tmp_path):
     rpc = SyntheticRPC()
-    app = create_app(f"sqlite:///{tmp_path}/test.db", rpc=rpc, prices=SyntheticPrices(), quotes=SyntheticQuotes())
+    app = create_app(database_url(tmp_path), rpc=rpc, prices=SyntheticPrices(), quotes=SyntheticQuotes())
     with TestClient(app) as c:
         c.post("/api/wallets", json={"address": WALLET, "label": "SYNTHETIC TEST"})
         yield c, rpc
@@ -267,7 +267,7 @@ def test_fomo_key_stays_server_side_and_upstream_report_is_not_proof(tmp_path, m
         return httpx.Response(200, json={"wallets": {"solana": WALLET}, "pnlUsd": 999999})
 
     fomo = FomoAPI(httpx.Client(transport=httpx.MockTransport(transport)))
-    app = create_app(f"sqlite:///{tmp_path}/fomo.db", rpc=SyntheticRPC(), fomo=fomo, prices=SyntheticPrices(),
+    app = create_app(database_url(tmp_path, "fomo.db"), rpc=SyntheticRPC(), fomo=fomo, prices=SyntheticPrices(),
                      quotes=SyntheticQuotes())
     with TestClient(app) as c:
         w = c.post("/api/integrations/fomo/resolve", json={"handle": "@test_user"}).json()

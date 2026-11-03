@@ -11,8 +11,30 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 
 from tracker.analytics import Fill
+
+# Optional: run the app and migration tests on this database instead of one SQLite file per test (CI sets a
+# PostgreSQL URL). Its `public` schema is dropped for every test, so the database name must contain "test".
+TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL")
+
+
+def database_url(tmp_path, name: str = "test.db") -> str:
+    """A fresh, empty database for one test: a SQLite file, or TEST_DATABASE_URL with its schema recreated.
+    Call it once per test and reuse the URL (each call empties the shared database again)."""
+    if not TEST_DATABASE_URL:
+        return f"sqlite:///{tmp_path}/{name}"
+    url = make_url(TEST_DATABASE_URL)
+    if url.get_backend_name() != "postgresql" or "test" not in (url.database or ""):
+        raise RuntimeError("TEST_DATABASE_URL must be a PostgreSQL database whose name contains 'test'")
+    engine = create_engine(url)
+    with engine.begin() as conn:
+        conn.execute(text("DROP SCHEMA IF EXISTS public CASCADE"))
+        conn.execute(text("CREATE SCHEMA public"))
+    engine.dispose()
+    return TEST_DATABASE_URL
 
 ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
 AS_OF = datetime(2026, 10, 31, 16, tzinfo=timezone.utc)

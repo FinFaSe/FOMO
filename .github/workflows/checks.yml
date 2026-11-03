@@ -15,6 +15,43 @@ jobs:
         working-directory: backend
       - run: uv run ruff check .
         working-directory: backend
+      - name: Migrations match the models (SQLite)
+        run: uv run python -m tracker.migrate upgrade && uv run alembic check
+        working-directory: backend
+        env:
+          DATABASE_URL: sqlite:///./.data/ci-check.db
+  backend-postgres:
+    # Same suite on PostgreSQL (the production database): types, string lengths, locks and upserts that
+    # SQLite does not enforce. The password only protects this throwaway service container.
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: tracker
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: tracker_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U tracker -d tracker_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    env:
+      DATABASE_URL: postgresql+psycopg://tracker:ci-only-password@127.0.0.1:5432/tracker_test
+      TEST_DATABASE_URL: postgresql+psycopg://tracker:ci-only-password@127.0.0.1:5432/tracker_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.23"
+          python-version: "3.12"
+      - run: uv sync --frozen --group dev
+        working-directory: backend
+      - name: Migrations apply and match the models (PostgreSQL)
+        run: uv run python -m tracker.migrate upgrade && uv run alembic check && uv run python -m tracker.migrate check
+        working-directory: backend
+      - name: Test suite on PostgreSQL
+        run: uv run pytest -q
+        working-directory: backend
   frontend:
     runs-on: ubuntu-latest
     steps:

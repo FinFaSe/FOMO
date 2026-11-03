@@ -298,16 +298,33 @@ npm run test:e2e
 ```
 
 Los fixtures unitarios son **sintéticos y exclusivos de pruebas**; nunca se cargan en la aplicación.
-Para una prueba real de RPC, sin inventar valoraciones:
+
+La misma suite corre en PostgreSQL con `TEST_DATABASE_URL` (el CI lo hace en un job propio, además de
+`alembic check` en SQLite y PostgreSQL). El esquema `public` de esa base se borra en cada prueba, así que
+su nombre debe contener `test`:
 
 ```bash
 cd backend
-uv run python ../scripts/live_smoke.py
+TEST_DATABASE_URL=postgresql+psycopg://tracker:CLAVE@127.0.0.1:5432/tracker_test uv run pytest -q
 ```
 
-La prueba real consulta una transacción pública, ingiere su wallet en una base SQLite temporal,
-comprueba deduplicación y confirma que no se invente un score verificado. No demuestra 90 días de historial
-ni 30 posiciones ganadoras. [Evidencia de validación](docs/validation.md).
+Prueba contra la red real, sin datos sintéticos (necesita acceso a Solana RPC, Coinbase, DEX Screener,
+GeckoTerminal y el block engine de Jito):
+
+```bash
+cd backend
+uv run python -m tracker.smoke              # o: uv run python ../scripts/live_smoke.py
+uv run python -m tracker.smoke --wallet DIRECCION --pages 2 --page-size 20
+```
+
+Comprobaciones obligatorias: transacción auditada y digest estable entre descargas, normalización (también de
+las últimas transacciones de pump.fun, PumpSwap y Jupiter: invariantes y al menos una compra/venta
+verificada), esquema en la última migración (`--database-url` para PostgreSQL), ingesta y resincronización
+sin volver a descargar lo guardado, SOL/USD, valoración y datos de mints, y que el análisis no invente un
+score verificado. Opcionales (solo avisan): cotizaciones de DEX Screener, velas de GeckoTerminal y las cuentas
+de propinas que designa Jito comparadas con las del normalizador. Sale con código 1 si falla una obligatoria.
+La lógica del script se prueba sin red en `tests/test_smoke.py`. No demuestra 90 días de historial ni 30
+posiciones ganadoras. [Evidencia de validación](docs/validation.md).
 
 ## Docker Compose
 

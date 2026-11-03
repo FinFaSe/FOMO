@@ -22,8 +22,9 @@ proceeds. Venue fees are already inside the swapped amount, i.e. prices are effe
 from decimal import Decimal
 
 NORMALIZER_VERSION = "balance-delta-v3"  # v2: token decimals per event; v3: Jito tips split from the swap
-# Jito's eight published tip accounts (getTipAccounts). A tip is a cost of getting the trade landed, not part of the
-# swapped amount: it is reported next to the network fee so the effective price is not inflated by it.
+# Jito's eight tip accounts, as the block engine's getTipAccounts returns them (re-checked by tracker.smoke). A tip
+# is a cost of getting the trade landed, not part of the swapped amount: it is reported next to the network fee so
+# the effective price is not inflated by it.
 JITO_TIP_ACCOUNTS = frozenset({
     "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5", "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
     "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY", "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1zt6iGPaS49",

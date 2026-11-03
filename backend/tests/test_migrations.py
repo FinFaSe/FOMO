@@ -1,4 +1,6 @@
-"""Alembic migrations: models match the migrations, pre-Alembic databases keep their data, locking and checks."""
+"""Alembic migrations: models match the migrations, pre-Alembic databases keep their data, locking and checks.
+
+Each test runs on SQLite, or on PostgreSQL when TEST_DATABASE_URL is set (CI runs both)."""
 
 import json
 import os
@@ -15,15 +17,11 @@ from sqlalchemy import inspect, text
 from tracker.db import Base, database, make_engine
 from tracker.migrate import BASELINE, SchemaOutdated, alembic_config, current_revision, head_revision, upgrade
 
-from .conftest import b58
+from .conftest import b58, database_url
 
 BACKEND = Path(__file__).resolve().parents[1]
 NEW_TABLES = {"sync_state", "trades", "price_candles", "jobs", "workers", "token_mints", "token_quotes",
               "discovery_seeds", "early_buys", "wallet_funding", "alerts", "alert_state", "pending_signatures"}
-
-
-def url(tmp_path, name="m.db"):
-    return f"sqlite:///{tmp_path}/{name}"
 
 
 def drift(engine):
@@ -33,7 +31,7 @@ def drift(engine):
 
 def test_models_match_the_migrations(tmp_path):
     """Fails when a model changes without a new revision (`alembic revision --autogenerate`)."""
-    engine = make_engine(url(tmp_path))
+    engine = make_engine(database_url(tmp_path, "m.db"))
     report = upgrade(engine)
     assert report["before"] is None and report["after"] == head_revision() and not report["stamped_baseline"]
     assert drift(engine) == []
@@ -42,12 +40,12 @@ def test_models_match_the_migrations(tmp_path):
 
 def pre_alembic_database(tmp_path, name="legacy.db"):
     """A database as the imported code left it: the six original tables, data, and no alembic_version."""
-    engine = make_engine(url(tmp_path, name))
+    engine = make_engine(database_url(tmp_path, name))
     with engine.begin() as conn:
         command.upgrade(alembic_config(conn), BASELINE)
         conn.execute(text("DROP TABLE alembic_version"))
         conn.execute(text("INSERT INTO wallets (address, chain, label, favorite, created_at) "
-                          "VALUES (:a, 'solana', 'LEGACY', 1, '2026-10-31T00:00:00+00:00')"), {"a": b58(111)})
+                          "VALUES (:a, 'solana', 'LEGACY', TRUE, '2026-10-31T00:00:00+00:00')"), {"a": b58(111)})
         conn.execute(text("INSERT INTO raw_transactions (signature, slot, payload, digest, source, fetched_at) "
                           "VALUES (:s, 1, :p, 'd', 'https://example.org', '2026-10-31T00:00:00+00:00')"),
                      {"s": b58(42, 64), "p": json.dumps({"slot": 1})})
@@ -61,7 +59,7 @@ def test_pre_alembic_database_is_stamped_and_upgraded_keeping_its_data(tmp_path)
     assert report["stamped_baseline"] and report["after"] == head_revision()
     assert NEW_TABLES <= set(inspect(engine).get_table_names())
     with engine.connect() as conn:
-        assert conn.execute(text("SELECT label, favorite FROM wallets")).one() == ("LEGACY", 1)
+        assert conn.execute(text("SELECT label, favorite FROM wallets")).one() == ("LEGACY", True)
         assert conn.execute(text("SELECT count(*) FROM raw_transactions")).scalar() == 1
     assert drift(engine) == []
 
@@ -76,7 +74,7 @@ def test_intermediate_development_database_gets_missing_columns(tmp_path):
                           "catchup_before VARCHAR(88), catchup_head VARCHAR(88), missing_block_times INTEGER NOT NULL, "
                           "updated_at VARCHAR(40) NOT NULL)"))
         conn.execute(text("INSERT INTO sync_state (wallet, head_signature, history_start_reached, "
-                          "missing_block_times, updated_at) VALUES (:w, 'HEAD', 1, 0, 'x')"), {"w": b58(111)})
+                          "missing_block_times, updated_at) VALUES (:w, 'HEAD', TRUE, 0, 'x')"), {"w": b58(111)})
     upgrade(engine)
     columns = {c["name"] for c in inspect(engine).get_columns("sync_state")}
     assert {"normalizer", "caught_up_at", "watch_head"} <= columns
@@ -87,15 +85,16 @@ def test_intermediate_development_database_gets_missing_columns(tmp_path):
 
 def test_auto_migrate_off_refuses_an_outdated_schema(tmp_path, monkeypatch):
     monkeypatch.setenv("TRACKER_AUTO_MIGRATE", "0")
+    target = database_url(tmp_path, "m.db")
     with pytest.raises(SchemaOutdated):
-        database(url(tmp_path))
-    upgrade(make_engine(url(tmp_path)))
-    engine, _ = database(url(tmp_path))  # now at head: starts normally
+        database(target)
+    upgrade(make_engine(target))
+    engine, _ = database(target)  # now at head: starts normally
     assert current_revision(engine) == head_revision()
 
 
 def test_downgrade_to_the_baseline_and_back(tmp_path):
-    engine = make_engine(url(tmp_path))
+    engine = make_engine(database_url(tmp_path, "m.db"))
     upgrade(engine)
     with engine.begin() as conn:
         command.downgrade(alembic_config(conn), BASELINE)
@@ -106,7 +105,7 @@ def test_downgrade_to_the_baseline_and_back(tmp_path):
 
 
 def test_concurrent_upgrades_from_two_processes_are_serialized(tmp_path):
-    target = url(tmp_path, "race.db")
+    target = database_url(tmp_path, "race.db")
     code = "import sys; from tracker.db import make_engine; from tracker.migrate import upgrade; " \
            "print(upgrade(make_engine(sys.argv[1]))['after'])"
     procs = [subprocess.Popen([sys.executable, "-c", code, target], cwd=BACKEND, stdout=subprocess.PIPE,
@@ -117,7 +116,7 @@ def test_concurrent_upgrades_from_two_processes_are_serialized(tmp_path):
 
 
 def test_cli_reports_and_upgrades(tmp_path):
-    env = {**os.environ, "DATABASE_URL": url(tmp_path, "cli.db")}
+    env = {**os.environ, "DATABASE_URL": database_url(tmp_path, "cli.db")}
     run = lambda action: subprocess.run([sys.executable, "-m", "tracker.migrate", action], cwd=BACKEND, env=env,  # noqa: E731
                                         capture_output=True, text=True, timeout=60)
     assert run("check").returncode != 0
