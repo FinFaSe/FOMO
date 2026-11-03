@@ -246,6 +246,17 @@ entradas en mints de pump.fun tienen market cap verificado; el resto deja la wal
 Un ranking vacío no significa que no existan traders rentables.
 Ver [auditoría y fuentes](docs/audit.md) y [alcance pendiente](docs/roadmap.md).
 
+**Ranking precalculado.** `GET /api/rankings` ya no analiza todas las wallets en cada consulta: cada wallet
+guarda una entrada por conjunto de filtros (`ranking_entries`), con la puntuación, las métricas y el análisis
+completo. Toda escritura en sus datos de análisis (operaciones, eventos importados, estado de sync) incrementa
+`analysis_revision` de la wallet en la misma transacción, y una entrada solo se usa si su revisión y la versión
+del método coinciden; si no, se recalcula antes de responder, así que el resultado es siempre el mismo que
+recalculando. Cada sync deja lista la entrada con los filtros por defecto, y el worker recalcula en segundo
+plano lo que invalidan el vigilante, las importaciones o una actualización del método (`GET /api/worker` →
+`ranking.stale`). `GET /api/wallets/{wallet}/analysis` sin `as_of` usa la misma entrada. Los snapshots
+inmutables se guardan solo cuando la API devuelve su id, y las entradas de otros filtros sin recalcular en
+7 días se borran.
+
 Variables opcionales:
 
 | Nombre | Uso |

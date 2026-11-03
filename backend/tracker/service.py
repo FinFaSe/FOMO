@@ -7,7 +7,17 @@ from sqlalchemy.exc import IntegrityError
 
 from .adapters.solana import ProviderError, digest, observe
 from .analytics import Fill, analyze, reconstruct, wilson
-from .db import AnalysisSnapshot, EventRecord, Observation, RawTransaction, SyncState, Trade, Wallet, now_iso
+from .db import (
+    AnalysisSnapshot,
+    EventRecord,
+    Observation,
+    RawTransaction,
+    SyncState,
+    Trade,
+    Wallet,
+    bump_analysis_revision,
+    now_iso,
+)
 from .normalize import NORMALIZER_VERSION, normalize
 from .schemas import Filters, LedgerImport, SyncRequest
 
@@ -59,6 +69,7 @@ def renormalize(session, wallet: str) -> dict:
     """Rebuild every trade of the wallet from its stored observations, e.g. after a normalizer update."""
 
     session.execute(delete(Trade).where(Trade.wallet == wallet))
+    bump_analysis_revision(session, {wallet})  # bulk delete: the flush hook does not see it
     rows = list(session.scalars(select(RawTransaction)
                                 .join(Observation, Observation.signature == RawTransaction.signature)
                                 .where(Observation.wallet == wallet)))
@@ -420,22 +431,31 @@ def wallet_fills(session, wallet: str) -> list[Fill]:
     return fills
 
 
-def wallet_analysis(session, wallet: Wallet, filters: Filters, as_of: datetime | None = None):
+def save_snapshot(session, result: dict) -> None:
+    """Store an analysis as its immutable snapshot (idempotent: the id is a digest of result and inputs)."""
+    snapshot_id = result["snapshot_id"]
+    if session.scalar(select(AnalysisSnapshot.id).where(AnalysisSnapshot.id == snapshot_id)):
+        return
+    session.add(AnalysisSnapshot(id=snapshot_id, wallet=result["wallet"], as_of=result["as_of"],
+                                 result=json.loads(json.dumps(result))))
+    try:
+        session.commit()
+    except IntegrityError:
+        # Ranking and profile GETs can request the same immutable snapshot concurrently.
+        session.rollback()
+        existing = session.get(AnalysisSnapshot, snapshot_id)
+        if existing is None or existing.result != result:
+            raise
+
+
+def wallet_analysis(session, wallet: Wallet, filters: Filters, as_of: datetime | None = None, *,
+                    persist: bool = True):
     as_of = as_of or default_as_of(session, wallet.address)
     fills = wallet_fills(session, wallet.address)
     complete = history_complete(session.get(SyncState, wallet.address), as_of, filters.analysis_days)
     result = analyze(wallet.address, fills, filters, as_of, history_complete=complete)
-    if not session.get(AnalysisSnapshot, result["snapshot_id"]):
-        session.add(AnalysisSnapshot(id=result["snapshot_id"], wallet=wallet.address,
-                                     as_of=as_of.isoformat(), result=json.loads(json.dumps(result))))
-        try:
-            session.commit()
-        except IntegrityError:
-            # Ranking and profile GETs can request the same immutable snapshot concurrently.
-            session.rollback()
-            existing = session.get(AnalysisSnapshot, result["snapshot_id"])
-            if existing is None or existing.result != result:
-                raise
+    if persist:
+        save_snapshot(session, result)
     return result
 
 

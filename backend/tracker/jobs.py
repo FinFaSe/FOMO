@@ -25,6 +25,7 @@ from .discovery import claim_seed, recover_stale_seeds, scan_seed
 from .entities import claim_funding, enqueue_funding, lookup_funding, recover_stale_funding
 from .history import claim_history, fetch_history
 from .pricing import price_trades
+from .ranking import prune, ranking_status, refresh_stale, refresh_wallet
 from .schemas import JobRequest, SyncRequest
 from .service import ingest
 from .tokens import refresh_mints
@@ -37,6 +38,7 @@ STALE_AFTER = timedelta(minutes=10)
 WORKER_ALIVE = timedelta(seconds=30)
 MAX_ATTEMPTS = 5
 RETRY_BASE_SECONDS = 30
+RANKING_BUDGET_SECONDS = 1.0  # per worker pass; a large backlog drains between jobs
 PROGRESS_KEYS = ("state", "transactions", "trades", "already_known", "rpc_transaction_fetches", "pages",
                  "issues", "cursor")
 
@@ -115,6 +117,15 @@ def sync_and_price(session, wallet: Wallet, rpc, prices, request: SyncRequest, o
     session.commit()
     # Watchlist alerts for whatever recent trades this sync stored (delivery happens in the background loops).
     report["alerts"] = generate_alerts(session)["created"]
+    try:
+        # Precompute the default-filter ranking entry, so the ranking is current as soon as the sync ends.
+        analysis = refresh_wallet(session, wallet)
+        report["ranking"] = {"eligible": analysis["eligible"],
+                             "score": analysis["score"]["verified_smart_money"]}
+    except Exception:  # never lose a finished sync over it: the entry is recomputed when read
+        session.rollback()
+        log.exception("ranking refresh failed for %s", wallet.address)
+        report["ranking"] = {"error": "ranking_refresh_failed"}
     wallet.sync = report
     session.commit()
     return report
@@ -259,7 +270,7 @@ def worker_status(session) -> dict:
     return {"alive": any(w.heartbeat_at >= alive_after for w in workers), **counts,
             "workers": [view(w) for w in workers[:5]],
             "watcher_alive": any(watcher_alive(w) for w in watchers),
-            "watchers": [view(w) for w in watchers[:5]]}
+            "watchers": [view(w) for w in watchers[:5]], "ranking": ranking_status(session)}
 
 
 class Worker:
@@ -273,7 +284,7 @@ class Worker:
             refresh_minutes = float(os.getenv("TRACKER_REFRESH_MINUTES", "30"))
         self.refresh = timedelta(minutes=refresh_minutes) if refresh_minutes > 0 else None
         self.poll_seconds, self.progress_interval = poll_seconds, progress_interval
-        self.next_schedule = 0.0
+        self.next_schedule = self.next_prune = 0.0
 
     def beat(self, session):
         row = session.get(WorkerHeartbeat, self.id)
@@ -285,8 +296,9 @@ class Worker:
         session.commit()
 
     def run_once(self):
-        """Housekeeping plus at most one unit of work, by priority: sync job, seed scan, funding lookup, price
-        history. Returns what ran (Job, DiscoverySeed, WalletFunding or PriceHistory), if anything."""
+        """Housekeeping (alert delivery, due quotes, stale jobs, refresh schedule, a slice of ranking refresh)
+        plus at most one unit of work, by priority: sync job, seed scan, funding lookup, price history.
+        Returns what ran (Job, DiscoverySeed, WalletFunding or PriceHistory), if anything."""
         with self.sessions() as session:
             self.beat(session)
             deliver_pending(session)  # outbound alert webhook, if configured
@@ -295,6 +307,7 @@ class Worker:
             if self.refresh and time.monotonic() >= self.next_schedule:
                 schedule_refresh(session, self.refresh, JobRequest())
                 self.next_schedule = time.monotonic() + 60
+            self.refresh_ranking(session)
             job = claim(session, self.id)
             if job is not None:
                 self.run(session, job)
@@ -325,6 +338,21 @@ class Worker:
             log.info("price history: %s %s %s (%s candles)", history.mint, history.timeframe, history.state,
                      history.candles)
             return history
+
+    def refresh_ranking(self, session):
+        """Keep the default-filter ranking current (entries invalidated by the watcher, imports, pricing or a
+        method change), in short slices so sync jobs are not delayed."""
+        if time.monotonic() >= self.next_prune:
+            prune(session)
+            self.next_prune = time.monotonic() + 3600
+        try:
+            done = refresh_stale(session, budget_seconds=RANKING_BUDGET_SECONDS)
+        except Exception:
+            session.rollback()
+            log.exception("ranking refresh failed")
+            return
+        if done["refreshed"]:
+            log.info("ranking: %s entries refreshed, %s pending", done["refreshed"], done["remaining"])
 
     def run(self, session, job: Job):
         wallet = session.get(Wallet, job.wallet)

@@ -128,6 +128,7 @@ export default function Tracker() {
   const [jobsVersion, setJobsVersion] = useState(0);
   const [verifyOffset, setVerifyOffset] = useState(0);
   const [rankings, setRankings] = useState<{ address: string; label: string; metrics: Analysis["metrics"]; entity: { size: number } | null }[]>([]);
+  const [rankingInfo, setRankingInfo] = useState<{ total: number; precomputed: { wallets: number; recomputed_now: number } } | null>(null);
   const [links, setLinks] = useState<WalletLinks | null>(null);
   const [alertList, setAlertList] = useState<AlertList | null>(null);
   const [unread, setUnread] = useState(0);
@@ -189,7 +190,8 @@ export default function Tracker() {
 
   useEffect(() => {
     let active = true;
-    api<{ items: typeof rankings }>(`/rankings?${query(filters)}`).then(r => { if (active) setRankings(r.items); })
+    api<{ items: typeof rankings; total: number; precomputed: { wallets: number; recomputed_now: number } }>(`/rankings?${query(filters)}`)
+      .then(r => { if (active) { setRankings(r.items); setRankingInfo({ total: r.total, precomputed: r.precomputed }); } })
       .catch(e => { if (active) setError(e.message); });
     return () => { active = false; };
   }, [filters, wallets]);
@@ -679,8 +681,9 @@ export default function Tracker() {
           </section>
         </>}
 
-        {tab === "rankings" && <section className="panel"><div className="section-heading"><h2>Ranking de evidencia validada</h2><span className="badge">{rankings.length} RESULTADOS</span></div>
+        {tab === "rankings" && <section className="panel"><div className="section-heading"><h2>Ranking de evidencia validada</h2><span className="badge">{rankingInfo?.total ?? rankings.length} RESULTADOS</span></div>
           <p className="muted">No utiliza el PnL reportado por FOMO para clasificar. Se exige historial normalizado completo y prueba de costos, ventas y capitalización de entrada.</p>
+          {rankingInfo && <p className="muted">Precalculado por wallet: solo se recalcula cuando cambian sus datos. {rankingInfo.precomputed.wallets} wallets al día{rankingInfo.precomputed.recomputed_now ? ` · ${rankingInfo.precomputed.recomputed_now} recalculadas en esta consulta` : ""}.</p>}
           {!rankings.length ? <div className="empty"><div className="empty-icon">↗</div><h2>Aún no hay traders que superen la verificación.</h2><p>Una clasificación vacía es el resultado correcto cuando falta evidencia. Descubre candidatos y examina su historial desde el explorador.</p><button className="secondary" onClick={() => setTab("overview")}>Investigar wallets →</button></div> : rankings.map(r => <button className="ranking-row" key={r.address} onClick={() => {setSelected(r.address); setTab("overview");}}>{r.label || short(r.address)}<span>{pct(r.metrics.win_rate)} · {r.metrics.evaluable_positions} posiciones{r.entity ? ` · vinculada con ${r.entity.size - 1} wallet(s): no son confirmaciones independientes` : ""}</span></button>)}
         </section>}
 

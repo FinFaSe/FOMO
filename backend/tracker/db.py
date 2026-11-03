@@ -6,15 +6,18 @@ from sqlalchemy import (
     JSON,
     BigInteger,
     Boolean,
+    Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
     UniqueConstraint,
     create_engine,
     event,
+    update,
 )
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
 
 def now_iso() -> str:
@@ -34,6 +37,9 @@ class Wallet(Base):
     identity: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[str] = mapped_column(String(40), default=now_iso)
     sync: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Bumped in the same transaction as any change to the wallet's analysis inputs (trades, ledger events,
+    # sync state): a precomputed ranking entry is valid only while it carries the current value.
+    analysis_revision: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
 
 
 class SyncState(Base):
@@ -391,6 +397,32 @@ class AnalysisSnapshot(Base):
     result: Mapped[dict] = mapped_column(JSON)
 
 
+class RankingEntry(Base):
+    """Precomputed ranking row: the analysis summary of one wallet under one filter set.
+
+    Valid while `revision` equals the wallet's `analysis_revision` and `engine` the running method versions;
+    otherwise it is recomputed (after each sync, by the worker, or when read).
+    """
+
+    __tablename__ = "ranking_entries"
+    __table_args__ = (Index("ix_ranking_entries_order", "filters_key", "eligible", "score"),)
+    wallet: Mapped[str] = mapped_column(ForeignKey("wallets.address"), primary_key=True)
+    filters_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    filters: Mapped[dict] = mapped_column(JSON)
+    revision: Mapped[int] = mapped_column(Integer)
+    engine: Mapped[str] = mapped_column(String(100))
+    as_of: Mapped[str] = mapped_column(String(40))
+    eligible: Mapped[bool] = mapped_column(Boolean)
+    score: Mapped[float | None] = mapped_column(Float, nullable=True)  # verified_smart_money, for ordering
+    summary: Mapped[dict] = mapped_column(JSON)  # score, metrics, exclusion reasons, behavior class
+    # Full analysis; saved as an immutable AnalysisSnapshot only when the API returns its id, so syncs that
+    # nobody looks at do not pile up snapshots.
+    result: Mapped[dict] = mapped_column(JSON)
+    snapshot_id: Mapped[str] = mapped_column(String(64), index=True)
+    computed_at: Mapped[str] = mapped_column(String(40), index=True)
+    compute_ms: Mapped[int] = mapped_column(Integer)
+
+
 class SourceCapture(Base):
     """Provider response retained privately; never re-served as a raw FOMO dataset."""
 
@@ -400,6 +432,26 @@ class SourceCapture(Base):
     captured_at: Mapped[str] = mapped_column(String(40), default=now_iso)
     digest: Mapped[str] = mapped_column(String(64))
     payload: Mapped[str] = mapped_column(Text)
+
+
+ANALYSIS_INPUTS = (Trade, EventRecord, SyncState)
+
+
+def bump_analysis_revision(session, wallets) -> None:
+    """Invalidate the precomputed analysis of these wallets (atomic increment, safe across processes)."""
+    if wallets:
+        table = Wallet.__table__
+        session.execute(update(table).where(table.c.address.in_(sorted(wallets)))
+                        .values(analysis_revision=table.c.analysis_revision + 1))
+
+
+@event.listens_for(Session, "before_flush")
+def _track_analysis_inputs(session, _flush_context, _instances):
+    """Every ORM write to an analysis input bumps its wallet's revision in the same transaction. Bulk
+    statements bypass this hook and must call bump_analysis_revision themselves."""
+    touched = {o.wallet for o in (*session.new, *session.deleted) if isinstance(o, ANALYSIS_INPUTS)}
+    touched |= {o.wallet for o in session.dirty if isinstance(o, ANALYSIS_INPUTS) and session.is_modified(o)}
+    bump_analysis_revision(session, touched)
 
 
 def resolve_url(url: str | None = None) -> str:

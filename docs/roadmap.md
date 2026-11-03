@@ -15,7 +15,8 @@ Implementado: primera ruta funcional de investigación, no la totalidad de la es
    tempranos con market cap de entrada y marcas, cruce entre semillas con aciertos por múltiplo; falta un pico
    histórico verificado vía OHLC y semillas automáticas): semillas históricas que incluyan tokens fallidos y desaparecidos; índices de swaps,
    coincidencia entre tokens y wallets; controlar sesgos y separar candidatos de resultados validados.
-4. **Rankings especializados y comparación**: Early Hunters, Consistent Winners, ≥1.000% (11×), High Accuracy,
+4. **Rankings especializados y comparación** (parcial: ranking precalculado por wallet y filtros, invalidado solo
+   cuando cambian los datos de la wallet): Early Hunters, Consistent Winners, ≥1.000% (11×), High Accuracy,
    Rising y Replicable. Añadir señales de entidades/deployers, límites de confianza y pesos configurables.
 5. **Monitoreo y alertas** (parcial: worker persistente, vigilante de la watchlist cada 20 s, webhook entrante,
    alertas de compra/venta/convergencia con retraso medido y entrega por webhook saliente; falta WebSocket y

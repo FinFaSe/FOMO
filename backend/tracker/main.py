@@ -44,6 +44,7 @@ from .history import chart, enqueue_history, history_json
 from .jobs import Worker, cancel, enqueue, ensure_idle, job_json, run_inline, worker_status
 from .portfolio import open_positions
 from .pricing import price_trades
+from .ranking import current_analysis, ranking
 from .schemas import (
     AlertsRead,
     BacktestRequest,
@@ -321,31 +322,21 @@ def create_app(db_url: str | None = None, rpc=None, fomo=None, prices=None, quot
     def analysis(wallet: str, filters: Annotated[Filters, Depends()], as_of: datetime | None = None,
                  s=Depends(session)):
         try:
-            timestamp = utc(as_of) if as_of else None  # default: last completed sync, else now
+            timestamp = utc(as_of) if as_of else None
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from None
-        return wallet_analysis(s, get_wallet(s, wallet), filters, timestamp)
+        row = get_wallet(s, wallet)
+        if timestamp is None:
+            # Default: as of the last completed sync, served from the precomputed entry when current.
+            return current_analysis(s, row, filters)
+        return wallet_analysis(s, row, filters, timestamp)
 
     @app.get("/api/rankings")
     def rankings(filters: Annotated[Filters, Depends()], limit: int = Query(20, ge=1, le=100),
                  offset: int = Query(0, ge=0), s=Depends(session)):
-        timestamp = datetime.now(timezone.utc).replace(microsecond=0)
-        results = []
-        groups = entity_index(s)
-        # Bounded local research dataset. No source-reported leaderboard PnL is used.
-        for wallet in s.scalars(select(Wallet).order_by(Wallet.address)):
-            # Each wallet is analyzed as of its own last completed sync, so its history is complete there.
-            r = wallet_analysis(s, wallet, filters)
-            if r["eligible"]:
-                entity = groups.get(wallet.address)
-                results.append({"address": wallet.address, "label": wallet.label, "as_of": r["as_of"],
-                                "score": r["score"], "metrics": r["metrics"], "snapshot_id": r["snapshot_id"],
-                                # Linked wallets may be one actor: they are not independent confirmations.
-                                "entity": {"id": entity["id"], "size": entity["size"],
-                                           "members": entity["members"]} if entity else None})
-        results.sort(key=lambda x: (-(x["score"]["verified_smart_money"] or 0), x["address"]))
-        return {"items": results[offset:offset+limit], "total": len(results), "as_of": timestamp.isoformat(),
-                "notice": "Solo historial completo y evidencia verificada; las importaciones no se autoverifican."}
+        # Bounded local research dataset; no source-reported leaderboard PnL is used. Each wallet is analyzed
+        # as of its own last completed sync (precomputed; anything outdated is recomputed before answering).
+        return ranking(s, filters, limit=limit, offset=offset)
 
     @app.get("/api/snapshots/{snapshot_id}")
     def snapshot(snapshot_id: str, s=Depends(session)):

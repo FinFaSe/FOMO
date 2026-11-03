@@ -85,6 +85,10 @@ ejecución, y no forma parte de snapshots ni del ranking.
 pendiente, `covered_from ≤ inicio de ventana`, `caught_up_at ≥ as_of`, sin `blockTime` ausentes y con todas las
 transacciones normalizadas por la versión vigente. `caught_up_at` es el inicio del escaneo menos 120 s, por el
 retraso de `finalized`. Sin `as_of` explícito, el análisis y el ranking usan el `caught_up_at` de cada wallet.
+El ranking y el análisis sin `as_of` se sirven de entradas precalculadas por wallet y filtros. Una entrada es
+válida solo mientras la revisión de análisis de la wallet (que sube con cualquier cambio en sus operaciones,
+eventos o estado de sync) y la versión del método coinciden; si no, se recalcula antes de responder. Por eso
+servirla equivale exactamente a recalcular. Una wallet sin sync completa se analiza a «ahora» y no se cachea.
 
 ## Descubrimiento hacia atrás
 

@@ -21,7 +21,7 @@ from .test_normalize import RAYDIUM, pump_buy, pump_sell
 
 SYNC = f"/api/wallets/{WALLET}/sync"
 PUMPSWAP = "pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA"
-TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGCPFb8DgmYvb3PHapEFXahtiQ"
+TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"  # SPL Token program
 
 
 def mint_account(supply="1000000000000000", decimals=6, mint_authority=None, freeze_authority=None,
